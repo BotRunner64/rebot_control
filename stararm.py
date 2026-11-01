@@ -82,8 +82,10 @@ def read_angles(bus):
         bus.servos[servo_id].angle_monitor = None
     states = bus.send_sync_servo_monitor(list(range(7)), realtime=True)
     angles = [getattr(states.get(i), "angle_monitor", None) for i in range(7)]
-    if any(x is None or not math.isfinite(x) or abs(x) > 368640 for x in angles):
-        raise ValueError("Missing or invalid angle feedback; cached values are not fresh samples.")
+    invalid = [i for i, value in enumerate(angles)
+               if value is None or not math.isfinite(value) or abs(value) > 368640]
+    if invalid:
+        raise ValueError(f"Missing or invalid angle feedback from servo IDs {invalid}.")
     return angles
 
 
