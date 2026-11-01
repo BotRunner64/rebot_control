@@ -1,0 +1,74 @@
+<mujoco model="stararm102-hd">
+  <!--Kinematic mirror from Fashion Star 102-HD URDF, local reference revision 298fd045. J5 restored as a -Z hinge using the same-series FL/ROS model; hand rings driven oppositely. Verify against hardware.-->
+  <compiler angle="radian" meshdir="meshes" inertiafromgeom="false" balanceinertia="true" />
+  <option gravity="0 0 0" timestep="0.002" />
+  <statistic center="0 0 0.2" extent="0.6" />
+  <visual>
+    <global azimuth="135" elevation="-25" offwidth="1280" offheight="960" />
+    <headlight ambient="0.4 0.4 0.4" diffuse="0.7 0.7 0.7" />
+  </visual>
+  <asset>
+    <texture name="grid" type="2d" builtin="checker" rgb1="0.22 0.25 0.29" rgb2="0.28 0.31 0.35" width="256" height="256" />
+    <material name="floor" texture="grid" texrepeat="8 8" reflectance="0.05" />
+    <mesh name="base_link" file="base_link.STL" />
+    <mesh name="link1" file="link1.STL" />
+    <mesh name="link2" file="link2.STL" />
+    <mesh name="link3" file="link3.STL" />
+    <mesh name="link4" file="link4.STL" />
+    <mesh name="link5" file="link5.STL" />
+    <mesh name="link6" file="link6.STL" />
+    <mesh name="link7_left" file="link7_left.STL" />
+    <mesh name="link7_right" file="link7_right.STL" />
+  </asset>
+  <worldbody>
+    <light pos="0 -0.3 1.5" dir="0 0 -1" diffuse="0.7 0.7 0.7" />
+    <geom name="floor" type="plane" size="1 1 0.01" pos="0 0 -0.001" material="floor" contype="0" conaffinity="0" />
+    <body name="base_link">
+      <inertial pos="-0.0066489 -6.1244E-05 0.014595" mass="0.17532" fullinertia="0.00028106 0.00012868 0.00038729 -7.522E-10 -1.7559E-06 4.9741E-08" />
+      <geom name="base_link_visual" type="mesh" mesh="base_link" rgba="0.83 0.85 0.88 1" contype="0" conaffinity="0" />
+      <body name="link1" pos="0 0 0.03135" quat="1 0 0 0">
+        <inertial pos="-0.00087968 -3.4464E-05 0.037748" mass="0.03694" fullinertia="1.0701E-05 6.9077E-06 1.2113E-05 1.5173E-13 3.8224E-07 3.3668E-09" />
+        <joint name="joint1" type="hinge" axis="0 0 -1" limited="false" range="-2.27 2.27" />
+        <geom name="link1_visual" type="mesh" mesh="link1" rgba="0.83 0.85 0.88 1" contype="0" conaffinity="0" />
+        <body name="link2" pos="0 0 0.061025" quat="-2.59734346696e-06 2.59735300756e-06 -0.707108079855 0.707105482506">
+          <inertial pos="0.065777 6.3715E-05 1.8697E-05" mass="0.067452" fullinertia="2.4706E-05 7.1265E-05 5.3685E-05 -1.4238E-06 -2.8914E-09 5.0149E-11" />
+          <joint name="joint2" type="hinge" axis="0 0 -1" limited="false" range="-1.57 1.57" />
+          <geom name="link2_visual" type="mesh" mesh="link2" rgba="0.83 0.85 0.88 1" contype="0" conaffinity="0" />
+          <body name="link3" pos="0.12162 -0.002 0" quat="0.707105482511 0 0 -0.707108079859">
+            <inertial pos="0.021966 -0.055886 1.7527E-05" mass="0.062483" fullinertia="6.0787E-05 2.412E-05 4.7941E-05 6.0746E-06 1.7224E-10 -3.855E-09" />
+            <joint name="joint3" type="hinge" axis="0 0 -1" limited="false" range="-1.57 1.57" />
+            <geom name="link3_visual" type="mesh" mesh="link3" rgba="0.83 0.85 0.88 1" contype="0" conaffinity="0" />
+            <body name="link4" pos="0.024219 -0.10865 0" quat="0.707105482511 0 0 -0.707108079859">
+              <inertial pos="0.0233834674648726 -0.000699844641775166 -5.55127523138999E-06" mass="0.0309593625995609" fullinertia="1.21518177163507E-05 1.48259937533172E-05 6.86725271793483E-06 2.15834745607597E-09 4.85577563764522E-09 1.97662841925093E-09" />
+              <joint name="joint4" type="hinge" axis="0 0 -1" limited="false" range="-1.57 1.57" />
+              <geom name="link4_visual" type="mesh" mesh="link4" rgba="0.83 0.85 0.88 1" contype="0" conaffinity="0" />
+              <body name="link5" pos="0.035 -0.00203 0" quat="0.707105482511 -0.707108079859 0 0">
+                <inertial pos="0.023965 6.5116E-07 0.012981" mass="0.043759" fullinertia="8.7053E-06 1.3624E-05 1.2266E-05 -4.0057E-12 2.0161E-07 8.5167E-11" />
+                <joint name="joint5" type="hinge" axis="0 0 -1" limited="false" range="-2.27 2.27" />
+                <geom name="link5_visual" type="mesh" mesh="link5" rgba="0.83 0.85 0.88 1" contype="0" conaffinity="0" />
+                <body name="link6" pos="0.1186 0 0.005875" quat="0.499998163397 -0.499999999997 0.500001836603 -0.499999999997">
+                  <inertial pos="-0.00296247096680713 0.0439473646791376 -0.039699656067242" mass="0.123187701413067" fullinertia="0.000186206201026983 3.44961326727544E-05 0.000182925132370783 -1.9319291521371E-06 1.46631100177797E-06 2.7158300264969E-05" />
+                  <joint name="joint6" type="hinge" axis="0 0 -1" limited="false" range="-2.27 2.27" />
+                  <geom name="link6_visual" type="mesh" mesh="link6" rgba="0.7 0.63 0.85 1" contype="0" conaffinity="0" />
+                  <body name="link7_left" pos="0.0032934 -0.0014419 -0.0031" quat="1 0 0 0">
+                    <inertial pos="0.00592248705454542 0.0392079282733965 -0.00134943636007287" mass="0.0115458690855196" fullinertia="7.05271769780606E-06 9.32070648108314E-07 7.70335019807904E-06 -6.19566371681288E-07 2.24015831300729E-08 3.09799594455424E-07" />
+                    <joint name="joint7_left" type="hinge" axis="0 0 -1" limited="false" range="-1.57 1.57" />
+                    <geom name="link7_left_visual" type="mesh" mesh="link7_left" rgba="0.7 0.63 0.85 1" contype="0" conaffinity="0" />
+                  </body>
+                  <body name="link7_right" pos="-0.016371 -0.0022579 -0.002" quat="1 0 0 0">
+                    <inertial pos="-0.00217423302874253 0.0403740245301992 -0.00259877882515686" mass="0.0110204411453406" fullinertia="7.13209181813597E-06 9.78258656597562E-07 7.73114874885643E-06 7.10011247872347E-07 -5.9582573339264E-08 4.55421454930675E-07" />
+                    <joint name="joint7_right" type="hinge" axis="0 0 -1" limited="false" range="-1.57 1.57" />
+                    <geom name="link7_right_visual" type="mesh" mesh="link7_right" rgba="0.7 0.63 0.85 1" contype="0" conaffinity="0" />
+                  </body>
+                </body>
+              </body>
+            </body>
+          </body>
+        </body>
+      </body>
+    </body>
+  </worldbody>
+  <keyframe>
+    <key name="reference" qpos="0 0 0 0 0 0 0 0" />
+  </keyframe>
+</mujoco>
