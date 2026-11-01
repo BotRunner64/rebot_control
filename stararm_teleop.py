@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Teleoperate two MuJoCo Star Arms from the calibrated physical leader arms."""
+"""Display Star Arms or teleoperate MuJoCo reBot RS arms from two Star Arm leaders."""
 import argparse
 from collections import deque
 from contextlib import contextmanager, ExitStack
@@ -18,9 +18,12 @@ import yaml
 
 from stararm import CONFIG, angle_difference, load_config, read_angles
 
-MODEL = Path(__file__).with_name("models") / "stararm.xml"
+MODELS = {name: Path(__file__).with_name("models") / filename
+          for name, filename in (("stararm", "stararm.xml"), ("rebot", "rebot_rs.xml"))}
 SIDES = ("left", "right")
-JOINTS = [f"joint{i}" for i in range(1, 7)] + ["joint7_left"]
+JOINTS = [f"joint{i}" for i in range(1, 7)]
+# RS follower mapping: apply signs in motor coordinates before model limits.
+DIRECTIONS = (1, 1, -1, -1, -1, 1)
 
 
 class HoverState:
@@ -79,54 +82,71 @@ class HoverState:
             print("Both arms still and handles closed; both hover hold commands sent.", flush=True)
 
 
-def load_model():
+def load_model(target="stararm"):
     import mujoco
 
-    root = ET.parse(MODEL).getroot()
-    root.find("compiler").set("meshdir", str(MODEL.parent / "meshes"))
+    path = MODELS[target]
+    root = ET.parse(path).getroot()
+    compiler = root.find("compiler")
+    compiler.set("meshdir", str(path.parent / compiler.get("meshdir")))
     world = root.find("worldbody")
     base = world.find("body[@name='base_link']")
     world.remove(base)
-    for side, y in zip(SIDES, (.22, -.22)):
+    # ABC-130K workstation base frames: 620 mm apart, 750 mm above the floor.
+    for side, y in zip(SIDES, (.31, -.31) if target == "rebot" else (.22, -.22)):
         body = deepcopy(base)
-        body.set("pos", f"0 {y} 0")
+        body.set("pos", f"0.2525 {y} 0.75" if target == "rebot" else f"0 {y} 0")
         for element in body.iter():
             if "name" in element.attrib:
                 element.set("name", f"{side}_{element.get('name')}")
         world.append(body)
-    root.find("keyframe/key[@name='reference']").set("qpos", " ".join(["0"] * 16))
+    reference = root.find("keyframe/key[@name='reference']")
+    if reference is not None:
+        reference.set("qpos", " ".join(["0"] * 16))
     model = mujoco.MjModel.from_xml_string(ET.tostring(root, encoding="unicode"))
     return model, mujoco.MjData(model)
 
 
-def set_model_pose(model, data, degrees):
+def set_model_pose(model, data, degrees, target="stararm"):
     import mujoco
 
     for side in SIDES:
-        for name, angle in zip(JOINTS, degrees[side]):
-            data.joint(f"{side}_{name}").qpos[0] = math.radians(angle)
-        data.joint(f"{side}_joint7_right").qpos[0] = -math.radians(degrees[side][6])
+        if target == "stararm":
+            for name, angle in zip(JOINTS, degrees[side]):
+                data.joint(f"{side}_{name}").qpos[0] = math.radians(angle)
+            data.joint(f"{side}_joint7_left").qpos[0] = math.radians(degrees[side][6])
+            data.joint(f"{side}_joint7_right").qpos[0] = -math.radians(degrees[side][6])
+            continue
+        for name, sign, angle in zip(JOINTS, DIRECTIONS, degrees[side]):
+            joint = model.joint(f"{side}_{name}")
+            low, high = joint.range
+            data.joint(joint.name).qpos[0] = max(low, min(high, math.radians(sign * angle)))
+        # The follower's 6x gripper motor target spans 0..270 degrees. Visualize
+        # that as the model's 0..50 mm slide; this is a linear preview mapping.
+        opening = max(0, min(1, degrees[side][6] * 6 / 270))
+        for name in ("joint7", "joint_left", "joint_right"):
+            data.joint(f"{side}_{name}").qpos[0] = opening * .05
     mujoco.mj_forward(model, data)
 
 
-def configure_view(viewer):
+def configure_view(viewer, target="stararm"):
     with viewer.lock():
-        viewer.cam.lookat[:] = [0, 0, .15]
-        viewer.cam.distance = 1.2
-        viewer.cam.azimuth = 160
+        viewer.cam.lookat[:] = [.4, 0, 1.0] if target == "rebot" else [0, 0, .15]
+        viewer.cam.distance = 1.7 if target == "rebot" else 1.2
+        viewer.cam.azimuth = 180 if target == "rebot" else 160
         viewer.cam.elevation = -25
     viewer.sync()
 
 
 @contextmanager
-def open_viewer(model, data):
+def open_viewer(model, data, target="stararm"):
     import mujoco.viewer
 
     before = set(threading.enumerate())
     viewer = mujoco.viewer.launch_passive(model, data, show_left_ui=False, show_right_ui=False)
     threads = set(threading.enumerate()) - before
     try:
-        configure_view(viewer)
+        configure_view(viewer, target)
         yield viewer
     finally:
         viewer.close()
@@ -151,9 +171,11 @@ def release_on_exit(side, bus):
         print(f"{side}: exit unlock command sent.", flush=True)
 
 
-def teleop(mode="observe", config=CONFIG):
+def teleop(mode="observe", config=CONFIG, target="stararm"):
     if mode not in ("observe", "hover"):
         raise ValueError(f"Unknown teleoperation mode: {mode}")
+    if target not in MODELS:
+        raise ValueError(f"Unknown teleoperation target: {target}")
     arms = load_config(config)
     references = {}
     for side in SIDES:
@@ -166,7 +188,7 @@ def teleop(mode="observe", config=CONFIG):
         references[side] = reference
     if Path(arms["left"]["port"]).resolve() == Path(arms["right"]["port"]).resolve():
         raise ValueError("The two arms must be bound to different serial ports.")
-    model, data = load_model()
+    model, data = load_model(target)
     with ExitStack() as stack:
         buses = {}
         for side in SIDES:
@@ -182,14 +204,19 @@ def teleop(mode="observe", config=CONFIG):
         for side, bus in buses.items():
             release_torque(bus)
             print(f"{side}: startup unlock command sent.", flush=True)
-        # Follow the ROS driver: servo degrees map directly to URDF joint angles.
-        set_model_pose(model, data, {side: angle_difference(raw[side], references[side]) for side in SIDES})
-        with open_viewer(model, data) as viewer:
+        # Preserve the SDK's multi-turn angles: wrapping before RS limits can
+        # jump from the upper limit to the lower limit at +/-180 degrees.
+        angles = {side: [angle - reference for angle, reference in zip(raw[side], references[side])]
+                  for side in SIDES}
+        set_model_pose(model, data, angles, target)
+        with open_viewer(model, data, target) as viewer:
             hovering = HoverState(references) if mode == "hover" else None
             if mode == "hover":
                 print("Hover enabled: both arms still and both handles closed -> hold both arms. "
                       "Open either handle -> release both arms. Exit unlocks both arms.", flush=True)
-            print("Dual-arm teleoperation started. Move both arms; close the viewer or Ctrl-C to stop.")
+            label = "reBot RS" if target == "rebot" else "Star Arm"
+            print(f"Star Arm -> MuJoCo {label} dual-arm teleoperation started. "
+                  "Move both leaders; close the viewer or Ctrl-C to stop.", flush=True)
             started, frames, failures = time.monotonic(), 0, 0
             last_valid = started
             while viewer.is_running():
@@ -219,9 +246,10 @@ def teleop(mode="observe", config=CONFIG):
                     failures = 0
                     if hovering is not None:
                         hovering.update(buses, raw)
-                    angles = {side: angle_difference(raw[side], references[side]) for side in SIDES}
+                    angles = {side: [angle - reference for angle, reference in zip(raw[side], references[side])]
+                              for side in SIDES}
                     with viewer.lock():
-                        set_model_pose(model, data, angles)
+                        set_model_pose(model, data, angles, target)
                         data.time = time.monotonic() - started
                     frames += 1
                 viewer.sync()
@@ -231,11 +259,13 @@ def teleop(mode="observe", config=CONFIG):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--target", choices=tuple(MODELS), default="stararm",
+                        help="stararm: display leader poses (default); rebot: teleoperate simulated RS arms")
     parser.add_argument("--mode", choices=("observe", "hover"), default="observe",
                         help="observe: release torque for manual movement (default); hover: paired stillness and handle-controlled pose holding")
     args = parser.parse_args()
     try:
-        teleop(mode=args.mode)
+        teleop(mode=args.mode, target=args.target)
         return 0
     except (OSError, ValueError, RuntimeError, EOFError, ImportError, yaml.YAMLError, serial.SerialException) as exc:
         print(str(exc), file=sys.stderr)

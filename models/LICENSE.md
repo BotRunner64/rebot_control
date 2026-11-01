@@ -1,3 +1,15 @@
+# Model provenance
+
+## reBot Arm RS
+
+`rebot_rs.xml` and `rebot_rs_meshes/` are a visualization-only extraction of the local `reBot-DevArm/Rebot_Arm_description/RS/mjcf/rs_arm.xml` archive: original arm transforms, inertias and visual meshes are retained; camera assets, collision meshes, actuators and equality constraints are omitted. Material metallic/roughness attributes are omitted for classic MuJoCo compatibility. The dual-arm base placement follows the dimensions documented in [ABC-130K](https://github.com/amazon-far/abc/blob/main/abc_sim/models/yam_bimanual_empty.xml); no YAM meshes are included. The scene includes a white tabletop using the documented workstation dimensions.
+
+The RS archive identifies [LAN-GER/reBot-B601-RS-for-mujoco_sim](https://github.com/LAN-GER/reBot-B601-RS-for-mujoco_sim), revision `1249cb6efdf393ba636056fc41df30dc6ba389aa`, as the original model source and records that no upstream LICENSE file existed at that revision. This notice preserves that provenance and does not grant new rights.
+
+## Star Arm 102-HD
+
+The following scope notice came with the retained Star Arm model assets. Its relative links refer to the upstream Star-Arm-102 repository.
+
 # License scope
 
 This repository contains components with different license declarations. Preserve each component's existing license and notices.

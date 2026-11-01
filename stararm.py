@@ -90,7 +90,7 @@ def read_angles(bus):
 
 
 def angle_difference(current, reference):
-    # All model joints are hinges: 360-degree branches describe the same pose.
+    # Shortest signed difference for circular calibration and hover comparisons.
     return [(a - b + 180) % 360 - 180 for a, b in zip(current, reference)]
 
 
