@@ -1,0 +1,21 @@
+{
+  "channel": "can0",
+  "host_id": 253,
+  "control_hz": 200,
+  "max_speed_deg_s": 30,
+  "max_step_deg": 10,
+  "acceleration_deg_s2": 90,
+  "lease_seconds": 1.5,
+  "feedback_timeout_seconds": 0.5,
+  "max_following_error_deg": 8,
+  "max_temperature_c": 75,
+  "joints": [
+    {"id": 1, "name": "基座旋转", "model": "rs-06", "min_deg": -150, "max_deg": 150, "kp": 50, "kd": 3, "identity": "5d8593c79c90b010"},
+    {"id": 2, "name": "肩关节", "model": "rs-06", "min_deg": 0, "max_deg": 220, "kp": 150, "kd": 10, "identity": "ab7493c79c90b013"},
+    {"id": 3, "name": "肘关节", "model": "rs-06", "min_deg": 0, "max_deg": 220, "kp": 150, "kd": 10, "identity": "be5f93c79c90b00d"},
+    {"id": 4, "name": "腕部俯仰", "model": "rs-00", "min_deg": -90, "max_deg": 90, "kp": 50, "kd": 5, "identity": "8e6793c79c90b00e"},
+    {"id": 5, "name": "腕部偏转", "model": "rs-00", "min_deg": -90, "max_deg": 90, "kp": 50, "kd": 4, "identity": "341993c79c90b00e"},
+    {"id": 6, "name": "末端旋转", "model": "rs-00", "min_deg": -180, "max_deg": 180, "kp": 50, "kd": 4, "identity": "044e93c79c90b015"},
+    {"id": 7, "name": "夹爪电机", "model": "rs-00", "min_deg": 0, "max_deg": 286, "kp": 50, "kd": 4, "identity": "c86093c79c90b015"}
+  ]
+}

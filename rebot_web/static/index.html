@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>reBot 关节控制</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <main>
+    <header>
+      <div class="title"><h1>reBot <span>B601-RS</span></h1><span id="status">未连接</span></div>
+      <div class="toolbar">
+        <label class="speed-label">速度 <select id="speed" aria-label="关节速度"><option value="5">5°/s</option><option value="15" selected>15°/s</option><option value="30">30°/s</option></select></label>
+        <button id="connect">连接</button><button id="takeover" hidden>接管</button>
+        <button id="enable-all" disabled>全部使能</button>
+        <button id="reset" disabled title="按所选速度返回已校准的零位，完成后保持使能">复位到零位</button>
+        <button id="stop" class="stop" disabled>停止并保持 <kbd>Esc</kbd></button>
+        <button id="disable-all" class="danger" disabled>全部失能</button>
+      </div>
+    </header>
+    <div class="table-head"><span>关节</span><span>实际角度</span><span>目标角度 · 使能后直接拖动</span></div>
+    <section id="joints" aria-label="关节控制"></section>
+    <footer><span>拖动后按所选速度到达目标。停止保留力矩，失能会撤去力矩。</span><span id="mode">MIT · 本地真机</span></footer>
+    <div id="error" role="alert" hidden><span></span><button id="dismiss" aria-label="关闭提示">×</button></div>
+  </main>
+</body>
+</html>

@@ -1,0 +1,656 @@
+{
+  "utc": "20261027T101107Z",
+  "apply": false,
+  "channel": "can0",
+  "before": {
+    "1": {
+      "token": "5d8593c79c90b010",
+      "position_rad": 2.473970413208008,
+      "velocity_rad_s": 0.0,
+      "voltage": 48.02000045776367,
+      "run_mode": 0,
+      "add_offset": 0.0
+    },
+    "2": {
+      "token": "ab7493c79c90b013",
+      "position_rad": 0.2335912436246872,
+      "velocity_rad_s": 0.0,
+      "voltage": 48.5099983215332,
+      "run_mode": 0,
+      "add_offset": 0.0
+    },
+    "3": {
+      "token": "be5f93c79c90b00d",
+      "position_rad": 5.840376377105713,
+      "velocity_rad_s": 0.0,
+      "voltage": 47.67000198364258,
+      "run_mode": 0,
+      "add_offset": 0.0
+    },
+    "4": {
+      "token": "8e6793c79c90b00e",
+      "position_rad": 2.4763052463531494,
+      "velocity_rad_s": 0.00347904278896749,
+      "voltage": 48.3529167175293,
+      "run_mode": 0,
+      "add_offset": 0.0
+    },
+    "5": {
+      "token": "341993c79c90b00e",
+      "position_rad": 1.583029866218567,
+      "velocity_rad_s": -0.008822290226817131,
+      "voltage": 48.17747116088867,
+      "run_mode": 0,
+      "add_offset": 0.0
+    },
+    "6": {
+      "token": "044e93c79c90b015",
+      "position_rad": 3.5374362468719482,
+      "velocity_rad_s": 0.00987405888736248,
+      "voltage": 47.86166763305664,
+      "run_mode": 0,
+      "add_offset": 0.0
+    },
+    "7": {
+      "token": "c86093c79c90b015",
+      "position_rad": 0.36040881276130676,
+      "velocity_rad_s": -0.025618940591812134,
+      "voltage": 47.4055061340332,
+      "run_mode": 0,
+      "add_offset": 0.0
+    }
+  },
+  "after": {},
+  "steps": [],
+  "complete": false,
+  "frames": [
+    {
+      "direction": "tx",
+      "kind": 0,
+      "motor": 1,
+      "id": "0xfd01",
+      "data": "0000000000000000"
+    },
+    {
+      "direction": "rx",
+      "kind": 0,
+      "motor": 1,
+      "id": "0x1fe",
+      "data": "5d8593c79c90b010"
+    },
+    {
+      "direction": "tx",
+      "kind": 17,
+      "motor": 1,
+      "id": "0x1100fd01",
+      "data": "1970000000000000"
+    },
+    {
+      "direction": "rx",
+      "kind": 17,
+      "motor": 1,
+      "id": "0x110001fd",
+      "data": "1970000088551e40"
+    },
+    {
+      "direction": "tx",
+      "kind": 17,
+      "motor": 1,
+      "id": "0x1100fd01",
+      "data": "1b70000000000000"
+    },
+    {
+      "direction": "rx",
+      "kind": 17,
+      "motor": 1,
+      "id": "0x110001fd",
+      "data": "1b70000000000000"
+    },
+    {
+      "direction": "tx",
+      "kind": 17,
+      "motor": 1,
+      "id": "0x1100fd01",
+      "data": "1c70000000000000"
+    },
+    {
+      "direction": "rx",
+      "kind": 17,
+      "motor": 1,
+      "id": "0x110001fd",
+      "data": "1c7000007b144042"
+    },
+    {
+      "direction": "tx",
+      "kind": 17,
+      "motor": 1,
+      "id": "0x1100fd01",
+      "data": "0570000000000000"
+    },
+    {
+      "direction": "rx",
+      "kind": 17,
+      "motor": 1,
+      "id": "0x110001fd",
+      "data": "0570000000000000"
+    },
+    {
+      "direction": "tx",
+      "kind": 17,
+      "motor": 1,
+      "id": "0x1100fd01",
+      "data": "2b70000000000000"
+    },
+    {
+      "direction": "rx",
+      "kind": 17,
+      "motor": 1,
+      "id": "0x110001fd",
+      "data": "2b70000000000000"
+    },
+    {
+      "direction": "tx",
+      "kind": 0,
+      "motor": 2,
+      "id": "0xfd02",
+      "data": "0000000000000000"
+    },
+    {
+      "direction": "rx",
+      "kind": 0,
+      "motor": 2,
+      "id": "0x2fe",
+      "data": "ab7493c79c90b013"
+    },
+    {
+      "direction": "tx",
+      "kind": 17,
+      "motor": 2,
+      "id": "0x1100fd02",
+      "data": "1970000000000000"
+    },
+    {
+      "direction": "rx",
+      "kind": 17,
+      "motor": 2,
+      "id": "0x110002fd",
+      "data": "197000008b326f3e"
+    },
+    {
+      "direction": "tx",
+      "kind": 17,
+      "motor": 2,
+      "id": "0x1100fd02",
+      "data": "1b70000000000000"
+    },
+    {
+      "direction": "rx",
+      "kind": 17,
+      "motor": 2,
+      "id": "0x110002fd",
+      "data": "1b70000000000000"
+    },
+    {
+      "direction": "tx",
+      "kind": 17,
+      "motor": 2,
+      "id": "0x1100fd02",
+      "data": "1c70000000000000"
+    },
+    {
+      "direction": "rx",
+      "kind": 17,
+      "motor": 2,
+      "id": "0x110002fd",
+      "data": "1c7000003d0a4242"
+    },
+    {
+      "direction": "tx",
+      "kind": 17,
+      "motor": 2,
+      "id": "0x1100fd02",
+      "data": "0570000000000000"
+    },
+    {
+      "direction": "rx",
+      "kind": 17,
+      "motor": 2,
+      "id": "0x110002fd",
+      "data": "0570000000000000"
+    },
+    {
+      "direction": "tx",
+      "kind": 17,
+      "motor": 2,
+      "id": "0x1100fd02",
+      "data": "2b70000000000000"
+    },
+    {
+      "direction": "rx",
+      "kind": 17,
+      "motor": 2,
+      "id": "0x110002fd",
+      "data": "2b70000000000000"
+    },
+    {
+      "direction": "tx",
+      "kind": 0,
+      "motor": 3,
+      "id": "0xfd03",
+      "data": "0000000000000000"
+    },
+    {
+      "direction": "rx",
+      "kind": 0,
+      "motor": 3,
+      "id": "0x3fe",
+      "data": "be5f93c79c90b00d"
+    },
+    {
+      "direction": "tx",
+      "kind": 17,
+      "motor": 3,
+      "id": "0x1100fd03",
+      "data": "1970000000000000"
+    },
+    {
+      "direction": "rx",
+      "kind": 17,
+      "motor": 3,
+      "id": "0x110003fd",
+      "data": "197000005de4ba40"
+    },
+    {
+      "direction": "tx",
+      "kind": 17,
+      "motor": 3,
+      "id": "0x1100fd03",
+      "data": "1b70000000000000"
+    },
+    {
+      "direction": "rx",
+      "kind": 17,
+      "motor": 3,
+      "id": "0x110003fd",
+      "data": "1b70000000000000"
+    },
+    {
+      "direction": "tx",
+      "kind": 17,
+      "motor": 3,
+      "id": "0x1100fd03",
+      "data": "1c70000000000000"
+    },
+    {
+      "direction": "rx",
+      "kind": 17,
+      "motor": 3,
+      "id": "0x110003fd",
+      "data": "1c70000015ae3e42"
+    },
+    {
+      "direction": "tx",
+      "kind": 17,
+      "motor": 3,
+      "id": "0x1100fd03",
+      "data": "0570000000000000"
+    },
+    {
+      "direction": "rx",
+      "kind": 17,
+      "motor": 3,
+      "id": "0x110003fd",
+      "data": "0570000000000000"
+    },
+    {
+      "direction": "tx",
+      "kind": 17,
+      "motor": 3,
+      "id": "0x1100fd03",
+      "data": "2b70000000000000"
+    },
+    {
+      "direction": "rx",
+      "kind": 17,
+      "motor": 3,
+      "id": "0x110003fd",
+      "data": "2b70000000000000"
+    },
+    {
+      "direction": "tx",
+      "kind": 0,
+      "motor": 4,
+      "id": "0xfd04",
+      "data": "0000000000000000"
+    },
+    {
+      "direction": "rx",
+      "kind": 0,
+      "motor": 4,
+      "id": "0x4fe",
+      "data": "8e6793c79c90b00e"
+    },
+    {
+      "direction": "tx",
+      "kind": 17,
+      "motor": 4,
+      "id": "0x1100fd04",
+      "data": "1970000000000000"
+    },
+    {
+      "direction": "rx",
+      "kind": 17,
+      "motor": 4,
+      "id": "0x110004fd",
+      "data": "19700000c97b1e40"
+    },
+    {
+      "direction": "tx",
+      "kind": 17,
+      "motor": 4,
+      "id": "0x1100fd04",
+      "data": "1b70000000000000"
+    },
+    {
+      "direction": "rx",
+      "kind": 17,
+      "motor": 4,
+      "id": "0x110004fd",
+      "data": "1b700000a700643b"
+    },
+    {
+      "direction": "tx",
+      "kind": 17,
+      "motor": 4,
+      "id": "0x1100fd04",
+      "data": "1c70000000000000"
+    },
+    {
+      "direction": "rx",
+      "kind": 17,
+      "motor": 4,
+      "id": "0x110004fd",
+      "data": "1c70000063694142"
+    },
+    {
+      "direction": "tx",
+      "kind": 17,
+      "motor": 4,
+      "id": "0x1100fd04",
+      "data": "0570000000000000"
+    },
+    {
+      "direction": "rx",
+      "kind": 17,
+      "motor": 4,
+      "id": "0x110004fd",
+      "data": "0570000000000000"
+    },
+    {
+      "direction": "tx",
+      "kind": 17,
+      "motor": 4,
+      "id": "0x1100fd04",
+      "data": "2b70000000000000"
+    },
+    {
+      "direction": "rx",
+      "kind": 17,
+      "motor": 4,
+      "id": "0x110004fd",
+      "data": "2b70000000000000"
+    },
+    {
+      "direction": "tx",
+      "kind": 0,
+      "motor": 5,
+      "id": "0xfd05",
+      "data": "0000000000000000"
+    },
+    {
+      "direction": "rx",
+      "kind": 0,
+      "motor": 5,
+      "id": "0x5fe",
+      "data": "341993c79c90b00e"
+    },
+    {
+      "direction": "tx",
+      "kind": 17,
+      "motor": 5,
+      "id": "0x1100fd05",
+      "data": "1970000000000000"
+    },
+    {
+      "direction": "rx",
+      "kind": 17,
+      "motor": 5,
+      "id": "0x110005fd",
+      "data": "19700000b9a0ca3f"
+    },
+    {
+      "direction": "tx",
+      "kind": 17,
+      "motor": 5,
+      "id": "0x1100fd05",
+      "data": "1b70000000000000"
+    },
+    {
+      "direction": "rx",
+      "kind": 17,
+      "motor": 5,
+      "id": "0x110005fd",
+      "data": "1b7000005e8b10bc"
+    },
+    {
+      "direction": "tx",
+      "kind": 17,
+      "motor": 5,
+      "id": "0x1100fd05",
+      "data": "1c70000000000000"
+    },
+    {
+      "direction": "rx",
+      "kind": 17,
+      "motor": 5,
+      "id": "0x110005fd",
+      "data": "1c700000bbb54042"
+    },
+    {
+      "direction": "tx",
+      "kind": 17,
+      "motor": 5,
+      "id": "0x1100fd05",
+      "data": "0570000000000000"
+    },
+    {
+      "direction": "rx",
+      "kind": 17,
+      "motor": 5,
+      "id": "0x110005fd",
+      "data": "0570000000000000"
+    },
+    {
+      "direction": "tx",
+      "kind": 17,
+      "motor": 5,
+      "id": "0x1100fd05",
+      "data": "2b70000000000000"
+    },
+    {
+      "direction": "rx",
+      "kind": 17,
+      "motor": 5,
+      "id": "0x110005fd",
+      "data": "2b70000000000000"
+    },
+    {
+      "direction": "tx",
+      "kind": 0,
+      "motor": 6,
+      "id": "0xfd06",
+      "data": "0000000000000000"
+    },
+    {
+      "direction": "rx",
+      "kind": 0,
+      "motor": 6,
+      "id": "0x6fe",
+      "data": "044e93c79c90b015"
+    },
+    {
+      "direction": "tx",
+      "kind": 17,
+      "motor": 6,
+      "id": "0x1100fd06",
+      "data": "1970000000000000"
+    },
+    {
+      "direction": "rx",
+      "kind": 17,
+      "motor": 6,
+      "id": "0x110006fd",
+      "data": "197000005b656240"
+    },
+    {
+      "direction": "tx",
+      "kind": 17,
+      "motor": 6,
+      "id": "0x1100fd06",
+      "data": "1b70000000000000"
+    },
+    {
+      "direction": "rx",
+      "kind": 17,
+      "motor": 6,
+      "id": "0x110006fd",
+      "data": "1b700000cec6213c"
+    },
+    {
+      "direction": "tx",
+      "kind": 17,
+      "motor": 6,
+      "id": "0x1100fd06",
+      "data": "1c70000000000000"
+    },
+    {
+      "direction": "rx",
+      "kind": 17,
+      "motor": 6,
+      "id": "0x110006fd",
+      "data": "1c70000059723f42"
+    },
+    {
+      "direction": "tx",
+      "kind": 17,
+      "motor": 6,
+      "id": "0x1100fd06",
+      "data": "0570000000000000"
+    },
+    {
+      "direction": "rx",
+      "kind": 17,
+      "motor": 6,
+      "id": "0x110006fd",
+      "data": "0570000000000000"
+    },
+    {
+      "direction": "tx",
+      "kind": 17,
+      "motor": 6,
+      "id": "0x1100fd06",
+      "data": "2b70000000000000"
+    },
+    {
+      "direction": "rx",
+      "kind": 17,
+      "motor": 6,
+      "id": "0x110006fd",
+      "data": "2b70000000000000"
+    },
+    {
+      "direction": "tx",
+      "kind": 0,
+      "motor": 7,
+      "id": "0xfd07",
+      "data": "0000000000000000"
+    },
+    {
+      "direction": "rx",
+      "kind": 0,
+      "motor": 7,
+      "id": "0x7fe",
+      "data": "c86093c79c90b015"
+    },
+    {
+      "direction": "tx",
+      "kind": 17,
+      "motor": 7,
+      "id": "0x1100fd07",
+      "data": "1970000000000000"
+    },
+    {
+      "direction": "rx",
+      "kind": 17,
+      "motor": 7,
+      "id": "0x110007fd",
+      "data": "197000008187b83e"
+    },
+    {
+      "direction": "tx",
+      "kind": 17,
+      "motor": 7,
+      "id": "0x1100fd07",
+      "data": "1b70000000000000"
+    },
+    {
+      "direction": "rx",
+      "kind": 17,
+      "motor": 7,
+      "id": "0x110007fd",
+      "data": "1b700000d0ded1bc"
+    },
+    {
+      "direction": "tx",
+      "kind": 17,
+      "motor": 7,
+      "id": "0x1100fd07",
+      "data": "1c70000000000000"
+    },
+    {
+      "direction": "rx",
+      "kind": 17,
+      "motor": 7,
+      "id": "0x110007fd",
+      "data": "1c7000003d9f3d42"
+    },
+    {
+      "direction": "tx",
+      "kind": 17,
+      "motor": 7,
+      "id": "0x1100fd07",
+      "data": "0570000000000000"
+    },
+    {
+      "direction": "rx",
+      "kind": 17,
+      "motor": 7,
+      "id": "0x110007fd",
+      "data": "0570000000000000"
+    },
+    {
+      "direction": "tx",
+      "kind": 17,
+      "motor": 7,
+      "id": "0x1100fd07",
+      "data": "2b70000000000000"
+    },
+    {
+      "direction": "rx",
+      "kind": 17,
+      "motor": 7,
+      "id": "0x110007fd",
+      "data": "2b70000000000000"
+    }
+  ]
+}
