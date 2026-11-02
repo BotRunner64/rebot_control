@@ -1,5 +1,56 @@
 ## rebot arm rs版的设置，控制，遥操作
 
+### reBot Arm RS 初始化
+
+`rebot.py` 沿用 Star Arm 的 `scan → bind → calibrate` 流程，使用当前环境已有的 `robstride-dynamics` SDK，通过原生 SocketCAN 查询 B601-RS。默认查询电机 ID 1–7（J1–J6 和夹爪），主机 ID 为 `0xFD`；型号按参考仓库配置为前三轴 `rs-06`、其余 `rs-00`。型号来自配置约定，扫描不会自动识别型号。参考本机 `real_projets/reBotArm_control_py/config/rebotarm_rs.yaml` 与 `example/2_zero_and_read.py`，以及 [Seeed RS 官方说明](https://wiki.seeedstudio.com/cn/rebot_arm_b601_rs_pinocchio_meshcat/)。
+
+`scan` 自动检查并配置 CAN：接口已启动且为 1 Mbps 时直接扫描；未启动、速率不符或处于 BUS-OFF/STOPPED 状态时，自动执行 `ip link` 的 down、设置 1 Mbps、up，再检查配置结果。普通用户通过 `sudo` 执行这三步，必要时终端会提示输入系统密码；仅这三条网络配置命令提权，Python 程序仍使用当前用户身份运行。直接执行：
+
+```bash
+conda activate rebot_control
+python rebot.py scan
+```
+
+默认处理所有原生 CAN 接口；单臂实验可用 `python rebot.py scan --channel can0` 仅配置并扫描指定接口。重启或重新拔插适配器后，再运行 `scan` 即可，无需手动重复设置。配置失败会显示系统错误并跳过该接口，不向其发送电机查询。`bind`、`calibrate`、`read` 仍只检查接口，若未就绪先运行 `scan`。需先停止占用这些电机的其他控制程序。每臂使用独立 CAN 适配器，两臂电机 ID 相同，不能直接合并在一条总线上。
+
+核对实物与适配器的对应关系后绑定左右身份。下面仅以 `can0` 对应左臂、`can1` 对应右臂为例，不能由接口编号推断实体左右：
+
+```bash
+python rebot.py bind left can0
+python rebot.py bind right can1
+python rebot.py read left
+python rebot.py read right
+```
+
+绑定要求七个 ID 全部在线且能读取角度，记录 USB 设备路径、电机 UID 和接口参数到被 Git 忽略的 `rebot.local.yaml`。USB 口不变时可根据设备路径找到重新编号后的 CAN 接口；换 USB 口后需重新绑定。更换适配器、机械臂或重新绑定加 `--replace`，旧软件标定同时清除。扫描仅覆盖预期 ID 1–7，不检测其他 ID，也不能可靠发现同一总线上重复 ID 的电机。
+
+若显示 `IDs []`，扫描会额外输出本次收到的帧数、CAN 状态以及系统累计收发包数和错误计数。本次收帧为 0 时，先检查机械臂独立 48V 电源是否开启，再检查 CAN 连接和终端电阻；USB-CAN 连接成功不表示电机已供电。收到其他流量但没有匹配的 ID 回复时，再检查电机 ID、协议配置。SDK 的 `WARNING: No calibration provided` 表示此查询连接没有加载运动标定，不会阻止扫描。设备 ID 查询（类型 0）的回复地址固定为 `0xFE`，参数读取仍校验请求的主机地址 `0xFD`，不能混用两者；见 [RobStride 电机协议手册](https://www.robstride.com/assets/product_manual_robStride04-37549d59.pdf)。
+
+**本机排障记录（2026-11-02）：CAN 已启动，但两臂均扫描不到 ID。** 两只机械臂的 48V 电源均已开启，用户确认接线和设备未更改，前一天可以正常读取。故障时 `can0`、`can1` 均为 UP、1 Mbps、`ERROR-ACTIVE`，发送包数增加，但接收包数始终为 0，`scan` 输出 `IDs []`。扩大 ID 和主机地址范围的只读探测、直接调用原版 RobStride SDK 查询也均无回复。因此，不能仅凭接口已启动或没有 CAN 错误计数就判断电机通信正常。
+
+本次经用户验证，**重新拔插 USB-CAN 后恢复了 ID 识别**。遇到同样现象，确认电机已供电后，可先按以下步骤恢复连接：
+
+1. 退出正在使用机械臂的控制或调试程序。
+2. 拔插电脑端的 USB-CAN USB 连接，不插拔带电的电机线束。
+3. 重新运行 `python rebot.py scan`，由脚本重新配置 CAN 并扫描；核对 USB 路径及左右臂对应关系，接口编号可能变化。
+
+本次恢复没有依赖重写电机 ID、硬件零位或重新标定。具体原因尚未确定，暂不能归因于驱动、适配器固件或 USB 连接中的某一项；重新拔插是本次验证有效的恢复方法。
+
+将机械臂和夹爪摆到约定的参考姿态（与 StarArm 遥操参考零姿态相对应，夹爪闭合），托稳并保持静止后采样：
+
+```bash
+python rebot.py calibrate left
+python rebot.py calibrate right
+python rebot.py read left --watch
+python rebot.py read right --watch
+```
+
+`calibrate` 立即读取十组新鲜角度；任一电机变化超过 2° 则拒绝保存。结果为七路 `reference_rad`，重新标定加 `--replace`。`read` 显示原始角度和减去参考角后的相对角度，单位为度，保留连续角度；`--watch` 持续读取，Ctrl-C 退出。此处输出的是电机坐标，未套用 StarArm 的方向映射或夹爪角度—行程换算。
+
+这些命令只发送设备 ID 查询和位置参数 `0x7019` 读取，不发送使能、卸力、运动、模式切换、硬件零位或参数写入；退出仅关闭 CAN socket。它们不释放已有锁力，也不提供重力补偿。缺失反馈、UID 不匹配、无效角度或收到故障报告时停止当前操作；不会用零值补齐。双臂按实物核对后分别执行，不要求同时连接。
+
+此软件参考标定与官方示例向电机发送的零位设置不同。尚未完成出厂/硬件零位设置的机械臂，需要按 [RS 快速入门](https://wiki.seeedstudio.com/cn/rebot_b601_rs_getting_started/) 完成对应步骤；本脚本的本地偏置不能替代该步骤。参考角也不会自动应用到现有 `stararm_teleop.py`：该脚本的 Rebot 目标仍仅控制 MuJoCo 模型，当前初始化入口尚未接入实体遥操。
+
 ### 多路 Webcam 预览
 
 安装依赖后运行 `webcam_viewer.py`，每个摄像头使用独立的 Tkinter 窗口显示。OpenCV 仅负责采集，Pillow 负责画面转换和缩放，不使用 OpenCV 窗口：
