@@ -49,7 +49,31 @@ python rebot.py read right --watch
 
 这些命令只发送设备 ID 查询和位置参数 `0x7019` 读取，不发送使能、卸力、运动、模式切换、硬件零位或参数写入；退出仅关闭 CAN socket。它们不释放已有锁力，也不提供重力补偿。缺失反馈、UID 不匹配、无效角度或收到故障报告时停止当前操作；不会用零值补齐。双臂按实物核对后分别执行，不要求同时连接。
 
-此软件参考标定与官方示例向电机发送的零位设置不同。尚未完成出厂/硬件零位设置的机械臂，需要按 [RS 快速入门](https://wiki.seeedstudio.com/cn/rebot_b601_rs_getting_started/) 完成对应步骤；本脚本的本地偏置不能替代该步骤。参考角也不会自动应用到现有 `stararm_teleop.py`：该脚本的 Rebot 目标仍仅控制 MuJoCo 模型，当前初始化入口尚未接入实体遥操。
+此软件参考标定与官方示例向电机发送的零位设置不同。尚未完成出厂/硬件零位设置的机械臂，需要按 [RS 快速入门](https://wiki.seeedstudio.com/cn/rebot_b601_rs_getting_started/) 完成对应步骤；本脚本的本地偏置不能替代该步骤。参考角也不会自动应用到现有 `stararm_teleop.py`：该脚本的 Rebot 目标仍由 StarArm 控制 MuJoCo 模型，不控制实体 RS。
+
+### 实体 reBot 双臂姿态同步到 MuJoCo
+
+完成两臂的 `bind` 和 `calibrate` 后，运行新脚本：
+
+```bash
+conda activate rebot_control
+python rebot_mirror.py
+```
+
+程序读取 `rebot.local.yaml`，按 USB 路径解析两块 CAN 适配器，核验两臂七个电机的 UID，再打开 MuJoCo 双臂场景。手动拖动实体 Rebot Arm 左右臂，仿真中的对应机械臂跟随显示。沿用现有 RS 模型、桌面和双臂布局。若 CAN 尚未启动，先运行 `python rebot.py scan`。
+
+实体臂应先处于可手动拖动状态，并在拖动时托稳。此脚本只查询角度，启动、运行和退出均不发送使能、卸力、运动、模式切换或硬件零位指令，也不提供重力补偿。如果实物已锁力，脚本不会自动解除锁力。关闭 MuJoCo 窗口或 Ctrl-C 退出并关闭两路 CAN 连接，不改写本地标定。
+
+六轴按 `当前电机角度（弧度）− reference_rad` 直接赋给对应模型关节，不应用 StarArm 的方向映射或角度倍率，不折回 ±π。标定时的实体参考姿态需对应模型零姿态，否则显示会有偏差；超出模型关节范围时裁剪并在终端提示。这里只更新关节位置并计算运动学，不进行动力学积分。
+
+夹爪用第七路电机相对于闭合参考角的变化显示开合，默认将 0–270° 映射为模型单侧 0–50 mm 行程，不使用 StarArm 手柄的 `×6` 倍率。该角度—行程关系仅用于比例预览，尚未实测标定，可按需要调整：
+
+```bash
+python rebot_mirror.py --fps 30 --gripper-open-deg 270
+python rebot_mirror.py --config /path/to/rebot.local.yaml
+```
+
+默认请求 30 Hz，每次顺序读取左、右臂各七路角度，不保证硬件同步；实际刷新率取决于 CAN 反馈速度。仅在两臂反馈均完整时更新姿态，任一侧读取失败则冻结两只模型并报告失败侧，短暂缺帧会重试；连续失败至少三次且距上次完整反馈已超过两秒时退出。收到电机故障报告则立即退出，不等待重试。
 
 ### 多路 Webcam 预览
 
