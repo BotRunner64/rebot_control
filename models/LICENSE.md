@@ -6,6 +6,8 @@
 
 The RS archive identifies [LAN-GER/reBot-B601-RS-for-mujoco_sim](https://github.com/LAN-GER/reBot-B601-RS-for-mujoco_sim), revision `1249cb6efdf393ba636056fc41df30dc6ba389aa`, as the original model source and records that no upstream LICENSE file existed at that revision. This notice preserves that provenance and does not grant new rights.
 
+`rebot_rs_dynamics.urdf` is a dynamics-only extract of `urdf/RS/urdf/ReBot_Arm_RS.urdf` from the local `reBotArm_control_py` reference repository: original link inertias, joint origins and axes are retained, visual and collision geometry is omitted. The inertial parameters are CAD values and have not been identified on this robot. Provenance is the same as the RS model above; no upstream LICENSE file was found for these assets at the referenced revision.
+
 ## Star Arm 102-HD
 
 The following scope notice came with the retained Star Arm model assets. Its relative links refer to the upstream Star-Arm-102 repository.
