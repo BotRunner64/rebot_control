@@ -9,6 +9,7 @@ dependencies = [
     "robstride-dynamics>=0.0.1",
     "python-can>=4.4",
     "numpy>=2.0",
+    "scipy>=1.11",
     "opencv-python-headless>=4.10",
     "Pillow>=10.0",
     "mujoco>=3.3",
