@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Manually return selected arms to their software reference, then keep enabled."""
+"""Return selected arms to their software reference, then disable all seven motors."""
 
 import argparse
 from contextlib import ExitStack
@@ -21,6 +21,43 @@ from rebot_motion import (HOME_SPEED, MotionController, MotionLog, MotionStats,
                           minimum_jerk, motion_settings, movement_duration)
 
 
+def disable(config=CONFIG, side="right"):
+    """Disable all seven motors per selected arm and verify their stopped state."""
+    arms = load_config(config)
+    sides = ("left", "right") if side == "both" else (side,)
+    if any(name not in arms for name in sides):
+        raise ValueError("Bind every selected arm first.")
+    channels = {name: resolve_channel(arms[name]) for name in sides}
+    if len(set(channels.values())) != len(sides):
+        raise ValueError("Selected arms must use distinct CAN interfaces.")
+    print("HOME DISABLE: all seven motors per selected arm, including the gripper, "
+          "will lose motor support.", flush=True)
+    success = True
+    motors = range(1, 8)
+    with ExitStack() as stack:
+        buses = {}
+        for name in sides:
+            buses[name] = stack.enter_context(MotorBus(channels[name], arms[name]["models"], motor_count=7))
+            verify_identity(buses[name], arms[name])
+        for name in sides:
+            for motor in motors:
+                try:
+                    buses[name].send(4, motor)
+                except Exception as exc:
+                    success = False
+                    print(f"{name} motor {motor}: disable send failed: {exc}", file=sys.stderr)
+        for name in sides:
+            bus = buses[name]
+            for motor in motors:
+                try:
+                    bus.transaction(motor, 2, lambda: bus.send(4, motor), expected_mode=0)
+                    print(f"{name} motor {motor}: disable confirmed.", flush=True)
+                except Exception as exc:
+                    success = False
+                    print(f"{name} motor {motor}: disable not verified: {exc}", file=sys.stderr)
+    return success
+
+
 def home(config=CONFIG, settings_path=SETTINGS_PATH, side="right", speed=HOME_SPEED, calibration=None):
     if not math.isfinite(speed) or speed <= 0:
         raise ValueError("Home speed must be finite and positive.")
@@ -35,6 +72,7 @@ def home(config=CONFIG, settings_path=SETTINGS_PATH, side="right", speed=HOME_SP
     if len(set(channels.values())) != len(sides):
         raise ValueError("Selected arms must use distinct CAN interfaces.")
     interrupted = False
+    completed = False
 
     def stop(signum, frame):
         nonlocal interrupted
@@ -73,7 +111,7 @@ def home(config=CONFIG, settings_path=SETTINGS_PATH, side="right", speed=HOME_SP
                     -cfg["torque_limit_nm"], cfg["torque_limit_nm"])
             for name in sides:
                 if interrupted:
-                    return
+                    return False
                 buses[name].prepare()
                 raw = np.asarray(buses[name].positions())
                 starts[name] = raw - references[name]
@@ -82,7 +120,9 @@ def home(config=CONFIG, settings_path=SETTINGS_PATH, side="right", speed=HOME_SP
                 buses[name].enable(raw)
             duration = max(movement_duration(q, np.zeros(6), speed) for q in starts.values())
             print(f"MANUAL HOME: {', '.join(sides)}; planned duration {duration:.1f}s. "
-                  "Space/Esc/Q/Ctrl-C stops and holds. Motors remain enabled after completion.", flush=True)
+                  "Completion disables all seven motors, including the gripper. "
+                  "Provide support at the reference pose before starting. "
+                  "Space/Esc/Q/Ctrl-C stops and holds without disabling.", flush=True)
             print("Joint-space interpolation does not provide collision avoidance.", flush=True)
             started = time.monotonic()
             settled = None
@@ -114,11 +154,20 @@ def home(config=CONFIG, settings_path=SETTINGS_PATH, side="right", speed=HOME_SP
                     if all(np.max(np.abs(q)) <= 0.03 for q in relative.values()):
                         settled = tick if settled is None else settled
                         if tick - settled >= 0.5:
-                            print("Home reached. Leaving native position hold enabled.", flush=True)
+                            completed = True
+                            print("Home reached. Preparing to disable all seven motors.", flush=True)
                             break
                     else:
                         settled = None
                 time.sleep(max(0, 1 / cfg["rate_hz"] - (time.monotonic() - tick)))
+        if not completed or interrupted:
+            print("Home interrupted. Keeping motors enabled; disable skipped.", flush=True)
+            return False
+        # Close the motion buses before disabling so their hold cleanup cannot
+        # send position commands after the motors have been disabled.
+        if not disable(config, side):
+            raise RuntimeError("Home reached, but disabling all selected motors was not confirmed.")
+        return True
     finally:
         for sig, handler in old_signals.items():
             signal.signal(sig, handler)
@@ -133,8 +182,7 @@ def main():
     parser.add_argument("--calibration", type=Path, help="Accepted robot-bound gravity calibration YAML")
     args = parser.parse_args()
     try:
-        home(args.config, args.settings, args.side, args.speed, args.calibration)
-        return 0
+        return 0 if home(args.config, args.settings, args.side, args.speed, args.calibration) else 130
     except (OSError, ValueError, RuntimeError, can.CanError, yaml.YAMLError,
             subprocess.SubprocessError) as exc:
         print(str(exc), file=sys.stderr)

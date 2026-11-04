@@ -14,7 +14,7 @@ from unittest.mock import MagicMock, patch
 
 import numpy as np
 
-import rebot_disable
+import rebot_home
 import rebot_mit as mit
 import rebot_teleop as teleop
 from test_rebot_hand_guiding import VirtualMotors, reply
@@ -262,7 +262,7 @@ class BindingAndDisableTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "distinct"):
                 teleop.load_bindings(None, None, "both")
 
-    def test_manual_disable_stops_all_seven_without_changing_parameters(self):
+    def test_home_disable_stops_all_seven_without_changing_parameters(self):
         virtual = MeasuredMotors()
         virtual.modes = dict.fromkeys(range(1, 8), 2)
         for motor in range(1, 8):
@@ -270,9 +270,9 @@ class BindingAndDisableTests(unittest.TestCase):
         parameters = dict(virtual.params)
         arms = {"right": {"models": ["rs-06"] * 3 + ["rs-00"] * 4, "motor_uids": virtual.uids}}
         with patch.object(mit, "check_channel"), patch.object(mit.can, "Bus", return_value=virtual), \
-                patch.object(rebot_disable, "load_config", return_value=arms), \
-                patch.object(rebot_disable, "resolve_channel", return_value="can0"), redirect_stdout(io.StringIO()):
-            self.assertTrue(rebot_disable.disable(side="right"))
+                patch.object(rebot_home, "load_config", return_value=arms), \
+                patch.object(rebot_home, "resolve_channel", return_value="can0"), redirect_stdout(io.StringIO()):
+            self.assertTrue(rebot_home.disable(side="right"))
         self.assertEqual(set(virtual.modes.values()), {0})
         self.assertEqual(virtual.params, parameters)
         self.assertEqual({(m.arbitration_id >> 24) & 31 for m in virtual.sent}, {0, 4})

@@ -20,7 +20,6 @@ import yaml
 
 import rebot_hand_guiding as drive
 import rebot_mit as mit
-import rebot_disable
 import rebot_home
 from rebot_motion import MotionLog
 
@@ -424,6 +423,8 @@ class LifecycleTests(unittest.TestCase):
                      patch.object(mit.can, "Bus", side_effect=lambda **kw: self.virtual[kw["channel"]]),
                      patch.object(drive, "load_config", return_value=self.arms),
                      patch.object(drive, "resolve_channel", side_effect=lambda arm: arm["channel"]),
+                     patch.object(rebot_home, "load_config", return_value=self.arms),
+                     patch.object(rebot_home, "resolve_channel", side_effect=lambda arm: arm["channel"]),
                      patch.object(rebot_home, "MotionLog", side_effect=lambda: MotionLog(self.journal_dir))):
             item.start()
             self.addCleanup(item.stop)
@@ -550,22 +551,21 @@ class LifecycleTests(unittest.TestCase):
             self.assertEqual(set(bus.modes.values()), {2})
             self.assertFalse(any((m.arbitration_id >> 24) & 31 == 4 for m in bus.sent))
 
-    def test_explicit_manual_script_is_the_only_disable_path(self):
+    def test_home_disable_stops_all_seven_motors(self):
         self.setup_run()
         for bus in self.virtual.values():
             bus.modes = dict.fromkeys(range(1, 8), 2)
-        with patch.object(rebot_disable, "load_config", return_value=self.arms), \
-                patch.object(rebot_disable, "resolve_channel", side_effect=lambda arm: arm["channel"]), \
+        with patch.object(rebot_home, "load_config", return_value=self.arms), \
+                patch.object(rebot_home, "resolve_channel", side_effect=lambda arm: arm["channel"]), \
                 redirect_stdout(io.StringIO()):
-            self.assertTrue(rebot_disable.disable(side="both"))
+            self.assertTrue(rebot_home.disable(side="both"))
         for bus in self.virtual.values():
             self.assertTrue(bus.closed)
             self.assertEqual(set(bus.modes.values()), {0})
             self.assertEqual({m.arbitration_id & 255 for m in bus.sent
                               if (m.arbitration_id >> 24) & 31 == 4}, set(range(1, 8)))
 
-    def test_manual_home_completion_keeps_motors_enabled(self):
-        self.setup_run()
+    def run_completed_home(self, side="both"):
         for bus in self.virtual.values():
             bus.position = 0.
         clock = [0.]
@@ -581,7 +581,11 @@ class LifecycleTests(unittest.TestCase):
                 patch.object(rebot_home, "resolve_channel", side_effect=lambda arm: arm["channel"]), \
                 patch.object(rebot_home.time, "monotonic", now), \
                 patch.object(rebot_home.time, "sleep", sleep), redirect_stdout(io.StringIO()):
-            rebot_home.home(side="both")
+            return rebot_home.home(side=side)
+
+    def test_manual_home_completion_disables_all_seven_motors_on_both_arms(self):
+        self.setup_run()
+        self.assertTrue(self.run_completed_home())
         journals = list(self.journal_dir.glob("home-*.jsonl"))
         self.assertEqual(len(journals), 1)
         rows = [json.loads(line) for line in journals[0].read_text().splitlines()]
@@ -592,9 +596,67 @@ class LifecycleTests(unittest.TestCase):
         self.assertTrue(all("native_parameters" in row and "cycle_s" in row for row in samples))
         for bus in self.virtual.values():
             self.assertTrue(bus.closed)
-            self.assertEqual(set(bus.modes.values()), {2})
-            self.assertFalse(any((m.arbitration_id >> 24) & 31 == 4 for m in bus.sent))
+            self.assertEqual(set(bus.modes.values()), {0})
+            self.assertEqual({m.arbitration_id & 255 for m in bus.sent
+                              if (m.arbitration_id >> 24) & 31 == 4}, set(range(1, 8)))
+            kinds = [(m.arbitration_id >> 24) & 31 for m in bus.sent]
+            first_disable = kinds.index(4)
+            self.assertNotIn(1, kinds[first_disable:])
+            self.assertNotIn(3, kinds[first_disable:])
 
+    def test_single_arm_home_does_not_disable_the_other_arm(self):
+        self.setup_run()
+        self.assertTrue(self.run_completed_home(side="right"))
+        self.assertEqual(set(self.virtual["can1"].modes.values()), {0})
+        self.assertFalse(self.virtual["can0"].sent)
+
+    def test_home_disable_failure_is_reported_and_other_motors_are_attempted(self):
+        self.setup_run()
+        self.virtual["can0"].drop_stops.add(3)
+        with redirect_stderr(io.StringIO()), self.assertRaisesRegex(RuntimeError, "not confirmed"):
+            self.run_completed_home()
+        self.assertEqual(self.virtual["can0"].modes[3], 2)
+        self.assertEqual(self.virtual["can0"].modes[7], 0)
+        self.assertEqual(set(self.virtual["can1"].modes.values()), {0})
+
+    def test_home_signal_or_motion_error_skips_disable(self):
+        for failure in ("signal", "error"):
+            with self.subTest(failure=failure):
+                self.setup_run()
+                original = rebot_home.MotionController.update
+
+                def update(controller, *args):
+                    if failure == "error":
+                        raise RuntimeError("Motion failed.")
+                    record = original(controller, *args)
+                    signal.raise_signal(signal.SIGINT)
+                    return record
+
+                with patch.object(rebot_home, "load_config", return_value=self.arms), \
+                        patch.object(rebot_home, "resolve_channel", side_effect=lambda arm: arm["channel"]), \
+                        patch.object(rebot_home.MotionController, "update", update), \
+                        patch.object(rebot_home, "disable") as disable, redirect_stdout(io.StringIO()):
+                    if failure == "error":
+                        with self.assertRaisesRegex(RuntimeError, "Motion failed"):
+                            rebot_home.home(side="right")
+                    else:
+                        self.assertFalse(rebot_home.home(side="right"))
+                    disable.assert_not_called()
+                bus = self.virtual["can1"]
+                self.assertTrue(bus.closed)
+                self.assertEqual(set(bus.modes.values()), {2})
+                self.assertFalse(any((m.arbitration_id >> 24) & 31 == 4 for m in bus.sent))
+
+    def test_home_cli_reports_completion_interruption_and_disable_failure(self):
+        for result, status in ((True, 0), (False, 130), (RuntimeError("Disable failed."), 2)):
+            with self.subTest(status=status), \
+                    patch.object(rebot_home.sys, "argv", ["rebot_home.py", "--side", "both"]), \
+                    patch.object(rebot_home, "home", return_value=result) as home, \
+                    redirect_stderr(io.StringIO()):
+                if isinstance(result, Exception):
+                    home.side_effect = result
+                self.assertEqual(rebot_home.main(), status)
+                self.assertEqual(home.call_args.args[2], "both")
 
     def test_home_tracking_lag_continues_until_manual_stop_and_keeps_enabled(self):
         self.setup_run()
@@ -615,7 +677,7 @@ class LifecycleTests(unittest.TestCase):
                 patch.object(rebot_home, "StopKey", return_value=keys), \
                 patch.object(rebot_home.time, "monotonic", now), \
                 patch.object(rebot_home.time, "sleep", sleep), redirect_stdout(output):
-            rebot_home.home(side="right")
+            self.assertFalse(rebot_home.home(side="right"))
         self.assertGreaterEqual(clock[0], 12)
         self.assertNotIn("Home reached", output.getvalue())
         bus = self.virtual["can1"]
@@ -664,13 +726,13 @@ class LifecycleTests(unittest.TestCase):
 
 class DisableIsolationTests(unittest.TestCase):
     def test_control_modules_cannot_call_disable_or_send_type_four(self):
-        for module in (drive, mit, rebot_home):
+        for module in (drive, mit):
             tree = ast.parse(Path(module.__file__).read_text())
             for node in ast.walk(tree):
                 if isinstance(node, ast.Import):
-                    self.assertFalse(any(n.name == "rebot_disable" for n in node.names))
+                    self.assertFalse(any(n.name == "rebot_home" for n in node.names))
                 if isinstance(node, ast.ImportFrom):
-                    self.assertNotEqual(node.module, "rebot_disable")
+                    self.assertNotEqual(node.module, "rebot_home")
                 if not isinstance(node, ast.Call):
                     continue
                 if isinstance(node.func, ast.Attribute):
