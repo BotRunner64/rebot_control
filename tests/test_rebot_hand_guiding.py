@@ -565,9 +565,9 @@ class LifecycleTests(unittest.TestCase):
             self.assertEqual({m.arbitration_id & 255 for m in bus.sent
                               if (m.arbitration_id >> 24) & 31 == 4}, set(range(1, 8)))
 
-    def run_completed_home(self, side="both"):
+    def run_completed_home(self, side="both", residual=0.):
         for bus in self.virtual.values():
-            bus.position = 0.
+            bus.position = residual
         clock = [0.]
 
         def now():
@@ -577,8 +577,11 @@ class LifecycleTests(unittest.TestCase):
         def sleep(duration):
             clock[0] += duration
 
+        keys = MagicMock()
+        keys.__enter__.return_value.pressed.side_effect = lambda: clock[0] >= 5
         with patch.object(rebot_home, "load_config", return_value=self.arms), \
                 patch.object(rebot_home, "resolve_channel", side_effect=lambda arm: arm["channel"]), \
+                patch.object(rebot_home, "StopKey", return_value=keys), \
                 patch.object(rebot_home.time, "monotonic", now), \
                 patch.object(rebot_home.time, "sleep", sleep), redirect_stdout(io.StringIO()):
             return rebot_home.home(side=side)
@@ -609,6 +612,21 @@ class LifecycleTests(unittest.TestCase):
         self.assertTrue(self.run_completed_home(side="right"))
         self.assertEqual(set(self.virtual["can1"].modes.values()), {0})
         self.assertFalse(self.virtual["can0"].sent)
+
+    def test_home_residual_within_relaxed_tolerance_disables_all_motors(self):
+        self.setup_run()
+        self.assertTrue(self.run_completed_home(side="right", residual=.04))
+        bus = self.virtual["can1"]
+        self.assertEqual(set(bus.modes.values()), {0})
+        self.assertEqual({m.arbitration_id & 255 for m in bus.sent
+                          if (m.arbitration_id >> 24) & 31 == 4}, set(range(1, 8)))
+
+    def test_home_residual_outside_tolerance_keeps_motors_enabled(self):
+        self.setup_run()
+        self.assertFalse(self.run_completed_home(side="right", residual=.06))
+        bus = self.virtual["can1"]
+        self.assertEqual(set(bus.modes.values()), {2})
+        self.assertFalse(any((m.arbitration_id >> 24) & 31 == 4 for m in bus.sent))
 
     def test_home_disable_failure_is_reported_and_other_motors_are_attempted(self):
         self.setup_run()

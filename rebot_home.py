@@ -151,7 +151,7 @@ def home(config=CONFIG, settings_path=SETTINGS_PATH, side="right", speed=HOME_SP
                                    "temperature": [buses[name].feedback[i]["temperature"] for i in range(1, 7)],
                                    **records[name]})
                 if progress == 1:
-                    if all(np.max(np.abs(q)) <= 0.03 for q in relative.values()):
+                    if all(np.max(np.abs(q)) <= 0.05 for q in relative.values()):
                         settled = tick if settled is None else settled
                         if tick - settled >= 0.5:
                             completed = True
