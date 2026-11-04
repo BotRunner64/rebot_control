@@ -29,11 +29,13 @@ MODE = 0x7005
 POSITION = 0x7019
 
 
-def encode_mit(motor_id, model, position, torque, kp=0.0, kd=0.0):
+def encode_mit(motor_id, model, position, torque, kp=0.0, kd=0.0, velocity=0.0,
+               *, allow_gripper=False):
     limits = LIMITS[model]
-    if (type(motor_id) is not int or not 1 <= motor_id <= 6
+    if (type(motor_id) is not int or not 1 <= motor_id <= (7 if allow_gripper else 6)
             or not math.isfinite(position) or abs(position) > limits.position
             or not math.isfinite(torque) or abs(torque) > limits.torque
+            or not math.isfinite(velocity) or abs(velocity) > limits.velocity
             or not math.isfinite(kp) or not 0 <= kp <= limits.kp
             or not math.isfinite(kd) or not 0 <= kd <= limits.kd):
         raise ValueError("Invalid MIT motor ID, position, torque, or gains.")
@@ -42,15 +44,30 @@ def encode_mit(motor_id, model, position, torque, kp=0.0, kd=0.0):
         return int((value + bound) / (2 * bound) * 65535)
 
     payload = struct.pack(">HHHH", unsigned(position, limits.position),
-                          unsigned(0, limits.velocity), int(kp / limits.kp * 65535),
+                          unsigned(velocity, limits.velocity), int(kp / limits.kp * 65535),
                           int(kd / limits.kd * 65535))
     return can.Message(arbitration_id=(1 << 24) | (unsigned(torque, limits.torque) << 8) | motor_id,
                        is_extended_id=True, data=payload)
 
 
+def decode_mit(frame, model):
+    """Decode transmitted commands for quasi-static effort estimation."""
+    limits = LIMITS[model]
+    position, velocity, kp, kd = struct.unpack(">HHHH", frame.data)
+    return {"position": position / 65535 * 2 * limits.position - limits.position,
+            "velocity": velocity / 65535 * 2 * limits.velocity - limits.velocity,
+            "kp": kp / 65535 * limits.kp, "kd": kd / 65535 * limits.kd,
+            "gravity": ((frame.arbitration_id >> 8) & 65535) / 65535 * 2 * limits.torque - limits.torque}
+
+
 class MotorBus:
-    def __init__(self, channel, models, timeout=0.03, max_temperature=65.0):
+    def __init__(self, channel, models, timeout=0.03, max_temperature=65.0, motor_count=6):
+        if type(motor_count) is not int or motor_count not in (6, 7):
+            raise ValueError("Control requires six arm motors or seven motors including the gripper.")
+        if len(models) < motor_count or any(model not in LIMITS for model in models[:motor_count]):
+            raise ValueError("Missing or unsupported controlled motor models.")
         check_channel(channel)
+        self.motor_ids = tuple(range(1, motor_count + 1))
         self.channel = channel
         self.models = models
         self.timeout = timeout
@@ -58,8 +75,15 @@ class MotorBus:
         self.bus = can.Bus(interface="socketcan", channel=channel, receive_own_messages=False)
         self.enabled = set()
         self.states = {}
+        self.feedback = {}
         self.hold_records = {}
         self.hold_gravity = None
+
+    def encode(self, motor, position, torque, kp=0., kd=0., velocity=0.):
+        if motor not in self.motor_ids:
+            raise ValueError("Motor is outside the selected control group.")
+        return encode_mit(motor, self.models[motor - 1], position, torque, kp, kd, velocity,
+                          allow_gripper=7 in self.motor_ids)
 
     def __enter__(self):
         return self
@@ -94,6 +118,15 @@ class MotorBus:
                 raise RuntimeError(f"{self.channel} motor {motor}: faults=0x{faults:02x}, "
                                    f"temperature={temperature:.1f} C")
             self.states[motor] = mode
+            if motor in self.motor_ids:
+                limits = LIMITS[self.models[motor - 1]]
+                _, velocity, torque, _ = struct.unpack(">HHHH", frame.data)
+                self.feedback[motor] = {
+                    "timestamp": frame.timestamp,
+                    "velocity": velocity / 65535 * 2 * limits.velocity - limits.velocity,
+                    "torque": torque / 65535 * 2 * limits.torque - limits.torque,
+                    "temperature": temperature,
+                }
         return kind, motor, bytes(frame.data)
 
     def drain(self):
@@ -153,40 +186,41 @@ class MotorBus:
                                f"readback {actual}, expected {value}.")
 
     def positions(self):
-        positions = [self.read_parameter(motor, POSITION, "f") for motor in range(1, 7)]
+        positions = [self.read_parameter(motor, POSITION, "f") for motor in self.motor_ids]
         if any(not math.isfinite(q) or abs(q) > 4 * math.pi for q in positions):
             raise ValueError(f"{self.channel}: invalid mechanical positions.")
         return positions
 
     def prepare(self):
         # Never stop motors or switch a running motor's mode automatically.
-        modes = {motor: self.read_parameter(motor, MODE, "b") for motor in range(1, 7)}
+        modes = {motor: self.read_parameter(motor, MODE, "b") for motor in self.motor_ids}
         if any(mode != 0 for mode in modes.values()):
             raise ValueError(f"{self.channel}: motors must already be in MIT mode. "
-                             "Use rebot_disable.py --prepare-mit manually while supported.")
-        for motor in range(1, 7):
+                             "Use rebot_disable.py --prepare-mit"
+                             f"{' --gripper' if 7 in self.motor_ids else ''} manually while supported.")
+        for motor in self.motor_ids:
             # Explicit user policy: a normal host exit must not reset the motors.
             # Native position hold is installed before closing an active bus.
             self.write_parameter(motor, WATCHDOG, 0, "I")
 
     def set_hold(self, positions, gravity, kp, kd):
-        if any(len(values) != 6 for values in (positions, gravity, kp, kd)):
-            raise ValueError("Native hold requires six positions, torques, and gains.")
+        if any(len(values) != len(self.motor_ids) for values in (positions, gravity, kp, kd)):
+            raise ValueError("Native hold requires one position, torque, and gains per controlled motor.")
         records = {i: (float(q), float(tau), float(p), float(d))
                    for i, (q, tau, p, d) in enumerate(zip(positions, gravity, kp, kd), 1)}
         for motor, values in records.items():
             if values[2] <= 0 or values[3] <= 0:
                 raise ValueError("Native hold gains must be positive.")
-            encode_mit(motor, self.models[motor - 1], *values)
+            self.encode(motor, *values)
         self.hold_records = records
 
     def enable(self, positions):
-        if len(positions) != 6:
-            raise ValueError("Expected six positions before enabling.")
-        if set(self.hold_records) != set(range(1, 7)):
+        if len(positions) != len(self.motor_ids):
+            raise ValueError("Expected one position per controlled motor before enabling.")
+        if set(self.hold_records) != set(self.motor_ids):
             raise ValueError("Configure native position hold before enabling motors.")
-        frames = [encode_mit(i, self.models[i - 1], q, self.hold_records[i][1],
-                             self.hold_records[i][2], self.hold_records[i][3])
+        frames = [self.encode(i, q, self.hold_records[i][1],
+                              self.hold_records[i][2], self.hold_records[i][3])
                   for i, q in enumerate(positions, 1)]
         for motor, frame in enumerate(frames, 1):
             # The preceding process may have left this motor actively holding.
@@ -213,9 +247,9 @@ class MotorBus:
             print(f"{self.channel} motor {motor}: enable confirmed (mode=2).", flush=True)
 
     def command(self, positions, torques, deadline=None):
-        if len(positions) != 6 or len(torques) != 6:
-            raise ValueError("Expected six positions and torques.")
-        frames = [encode_mit(i, self.models[i - 1], q, tau)
+        if len(positions) != len(self.motor_ids) or len(torques) != len(self.motor_ids):
+            raise ValueError("Expected one position and torque per controlled motor.")
+        frames = [self.encode(i, q, tau)
                   for i, (q, tau) in enumerate(zip(positions, torques), 1)]
 
         def send_fresh(frame):
@@ -226,6 +260,36 @@ class MotorBus:
 
         for motor, frame in enumerate(frames, 1):
             self.transaction(motor, 2, lambda: send_fresh(frame), expected_mode=2)
+
+    def command_position(self, positions, velocities, gravity, kp, kd, deadline):
+        """Send native MIT position/velocity/PD commands as one selected-motor batch."""
+        if any(len(values) != len(self.motor_ids) for values in (positions, velocities, gravity, kp, kd)):
+            raise ValueError("Expected native targets, gains, and feedforward per controlled motor.")
+        frames = [self.encode(i, q, tau, p, d, velocity=v)
+                  for i, (q, v, tau, p, d) in enumerate(zip(positions, velocities, gravity, kp, kd), 1)]
+        self.drain()
+        sent_at = time.time()
+        # Do not wait for each axis before updating the next axis.
+        for frame in frames:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(f"{self.channel}: motion feedback deadline expired.")
+            self.bus.send(frame, timeout=min(.01, remaining))
+        pending = set(self.motor_ids)
+        reply_deadline = min(deadline, time.monotonic() + self.timeout)
+        while pending and (remaining := reply_deadline - time.monotonic()) > 0:
+            frame = self.bus.recv(timeout=remaining)
+            if frame is None:
+                break
+            parsed = self.inspect(frame)
+            if parsed is None or frame.timestamp < sent_at - .001:
+                continue
+            kind, motor, _ = parsed
+            if kind == 2 and motor in pending and self.states.get(motor) == 2:
+                pending.remove(motor)
+        if pending:
+            raise TimeoutError(f"{self.channel}: missing native motion feedback from motors {sorted(pending)}.")
+        return [decode_mit(frame, model) for frame, model in zip(frames, self.models)]
 
     def freeze(self):
         """Leave enabled motors holding position; never send a disable command."""
@@ -241,11 +305,11 @@ class MotorBus:
                 candidate[motor] = (positions[motor - 1],
                                     float(gravity[motor - 1]) if gravity is not None else old[1],
                                     old[2], old[3])
-                encode_mit(motor, self.models[motor - 1], *candidate[motor])
+                self.encode(motor, *candidate[motor])
             records = candidate
         except Exception as exc:
             print(f"{self.channel}: hold uses last validated pose ({exc}).", file=sys.stderr, flush=True)
-        frames = {motor: encode_mit(motor, self.models[motor - 1], *records[motor])
+        frames = {motor: self.encode(motor, *records[motor])
                   for motor in sorted(self.enabled)}
         # First send hold to all motors, then spend time checking acknowledgements.
         for motor, frame in frames.items():

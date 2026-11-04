@@ -14,7 +14,7 @@ from rebot import CONFIG, load_config, resolve_channel, verify_identity
 from rebot_mit import MODE, MotorBus
 
 
-def disable(config=CONFIG, side="right", prepare_mit=False):
+def disable(config=CONFIG, side="right", prepare_mit=False, gripper=False):
     arms = load_config(config)
     sides = ("left", "right") if side == "both" else (side,)
     if any(name not in arms for name in sides):
@@ -25,6 +25,7 @@ def disable(config=CONFIG, side="right", prepare_mit=False):
     print("MANUAL DISABLE: selected arms will lose motor support. "
           "Place them on a support before running this command.", flush=True)
     success = True
+    motors = range(1, 8 if gripper else 7)
     with ExitStack() as stack:
         buses = {}
         for name in sides:
@@ -33,7 +34,7 @@ def disable(config=CONFIG, side="right", prepare_mit=False):
         # The only physical disable commands in these experimental control tools
         # live here, behind an explicit invocation of this standalone script.
         for name in sides:
-            for motor in range(1, 7):
+            for motor in motors:
                 try:
                     buses[name].send(4, motor)
                 except Exception as exc:
@@ -41,7 +42,7 @@ def disable(config=CONFIG, side="right", prepare_mit=False):
                     print(f"{name} motor {motor}: disable send failed: {exc}", file=sys.stderr)
         for name in sides:
             bus = buses[name]
-            for motor in range(1, 7):
+            for motor in motors:
                 try:
                     bus.transaction(motor, 2, lambda: bus.send(4, motor), expected_mode=0)
                     if prepare_mit:
@@ -59,9 +60,10 @@ def main():
     parser.add_argument("--side", choices=("left", "right", "both"), default="right")
     parser.add_argument("--prepare-mit", action="store_true",
                         help="After confirming manual disable, set and verify MIT mode")
+    parser.add_argument("--gripper", action="store_true", help="Also disable or prepare gripper motor 7")
     args = parser.parse_args()
     try:
-        return 0 if disable(args.config, args.side, args.prepare_mit) else 2
+        return 0 if disable(args.config, args.side, args.prepare_mit, args.gripper) else 2
     except (OSError, ValueError, RuntimeError, can.CanError, yaml.YAMLError,
             subprocess.SubprocessError) as exc:
         print(str(exc), file=sys.stderr)

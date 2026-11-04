@@ -3,6 +3,7 @@
 from contextlib import redirect_stderr, redirect_stdout
 import ast
 import io
+import json
 import math
 from pathlib import Path
 import struct
@@ -21,6 +22,7 @@ import rebot_hand_guiding as drive
 import rebot_mit as mit
 import rebot_disable
 import rebot_home
+from rebot_motion import MotionLog
 
 
 def reply(kind, motor, data=bytes(8), mode=0):
@@ -257,6 +259,40 @@ class ProtocolTests(unittest.TestCase):
             self.bus.command([.2] * 6, [0.] * 5 + [math.nan])
         self.assertEqual(self.virtual.sent, [])
 
+    def test_native_motion_sends_all_axes_before_waiting_for_replies(self):
+        self.virtual.modes = dict.fromkeys(range(1, 7), 2)
+        original = self.virtual.recv
+        counts = []
+
+        def recv(timeout):
+            count = sum((frame.arbitration_id >> 24) & 31 == 1 for frame in self.virtual.sent)
+            if count:
+                counts.append(count)
+            return original(timeout)
+
+        self.virtual.recv = recv
+        result = self.bus.command_position([.3] * 6, [.04] * 6, [1.] * 6,
+                                          [12.] * 6, [.5] * 6, time.monotonic() + .08)
+        self.assertEqual(len(result), 6)
+        self.assertTrue(counts)
+        self.assertEqual(set(counts), {6})
+        for record in result:
+            self.assertAlmostEqual(record["position"], .3, delta=.001)
+            self.assertAlmostEqual(record["velocity"], .04, delta=.002)
+            self.assertGreater(record["kp"], 0)
+            self.assertGreater(record["kd"], 0)
+
+    def test_native_motion_rejects_invalid_batch_and_missing_feedback(self):
+        with self.assertRaises(ValueError):
+            self.bus.command_position([.2] * 6, [0.] * 5 + [math.nan], [0.] * 6,
+                                      [12.] * 6, [.5] * 6, time.monotonic() + .08)
+        self.assertEqual(self.virtual.sent, [])
+        self.virtual.modes = dict.fromkeys(range(1, 7), 2)
+        self.virtual.drop_holds.add(6)
+        with self.assertRaisesRegex(TimeoutError, "motors \\[6\\]"):
+            self.bus.command_position([.2] * 6, [0.] * 6, [0.] * 6,
+                                      [12.] * 6, [.5] * 6, time.monotonic() + .08)
+
     def test_overtemperature_status_aborts(self):
         hot = reply(2, 2, struct.pack(">HHHH", 32767, 32767, 32767, 700))
         with self.assertRaisesRegex(RuntimeError, "temperature=70"):
@@ -377,6 +413,9 @@ class ProtocolTests(unittest.TestCase):
 
 class LifecycleTests(unittest.TestCase):
     def setup_run(self, fail_right=False):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.journal_dir = Path(directory.name)
         self.virtual = {"can0": VirtualMotors(), "can1": VirtualMotors(100, 3 if fail_right else None)}
         self.arms = {side: dict(channel=channel, models=["rs-06"] * 3 + ["rs-00"] * 4,
                                reference_rad=[0.] * 7, motor_uids=self.virtual[channel].uids)
@@ -384,23 +423,41 @@ class LifecycleTests(unittest.TestCase):
         for item in (patch.object(mit, "check_channel"),
                      patch.object(mit.can, "Bus", side_effect=lambda **kw: self.virtual[kw["channel"]]),
                      patch.object(drive, "load_config", return_value=self.arms),
-                     patch.object(drive, "resolve_channel", side_effect=lambda arm: arm["channel"])):
+                     patch.object(drive, "resolve_channel", side_effect=lambda arm: arm["channel"]),
+                     patch.object(rebot_home, "MotionLog", side_effect=lambda: MotionLog(self.journal_dir))):
             item.start()
             self.addCleanup(item.stop)
 
-    def test_default_check_never_changes_motor_state(self):
+    def test_default_run_enables_motors_and_sends_control_torque(self):
         self.setup_run()
         with redirect_stdout(io.StringIO()):
             drive.run(side="both", duration=.02)
         for bus in self.virtual.values():
             self.assertTrue(bus.closed)
-            self.assertTrue(all((m.arbitration_id >> 24) & 31 in (0, 17) for m in bus.sent))
+            self.assertEqual(set(bus.modes.values()), {2})
+            commands = [m for m in bus.sent if (m.arbitration_id >> 24) & 31 == 1]
+            self.assertTrue(any(struct.unpack(">HHHH", m.data)[2:] == (0, 0) for m in commands))
+            self.assertTrue(all(struct.unpack(">HHHH", m.data)[2] > 0 for m in commands[-6:]))
+
+    def test_cli_runs_without_enable_flag(self):
+        with patch.object(drive.sys, "argv", ["rebot_hand_guiding.py", "--side", "both"]), \
+                patch.object(drive, "run") as run:
+            self.assertEqual(drive.main(), 0)
+            run.assert_called_once()
+            self.assertEqual(run.call_args.kwargs["side"], "both")
+            self.assertNotIn("enable", run.call_args.kwargs)
+
+    def test_removed_enable_flag_is_rejected(self):
+        with patch.object(drive.sys, "argv", ["rebot_hand_guiding.py", "--enable"]), \
+                redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as error:
+            drive.main()
+        self.assertEqual(error.exception.code, 2)
 
     def test_partial_dual_enable_failure_keeps_enabled_motors_held(self):
         self.setup_run(fail_right=True)
         with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
             with self.assertRaises(TimeoutError):
-                drive.run(side="both", enable=True, duration=.02)
+                drive.run(side="both", duration=.02)
         for bus in self.virtual.values():
             self.assertTrue(bus.closed)
             self.assertFalse(any((m.arbitration_id >> 24) & 31 == 4 for m in bus.sent))
@@ -411,7 +468,7 @@ class LifecycleTests(unittest.TestCase):
     def test_duration_exit_leaves_native_hold_on_both_arms(self):
         self.setup_run()
         with redirect_stdout(io.StringIO()):
-            drive.run(side="both", enable=True, duration=.025)
+            drive.run(side="both", duration=.025)
         for bus in self.virtual.values():
             commands = [m for m in bus.sent if (m.arbitration_id >> 24) & 31 == 1]
             self.assertGreater(len(commands), 6)
@@ -436,7 +493,7 @@ class LifecycleTests(unittest.TestCase):
         with patch.object(drive.HandGuidingController, "update", delayed_update), \
                 redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
             with self.assertRaisesRegex(RuntimeError, "too old"):
-                drive.run(side="both", enable=True, duration=.025)
+                drive.run(side="both", duration=.025)
         for bus in self.virtual.values():
             kinds = [(m.arbitration_id >> 24) & 31 for m in bus.sent]
             last_enable = max(i for i, kind in enumerate(kinds) if kind == 3)
@@ -456,7 +513,7 @@ class LifecycleTests(unittest.TestCase):
             return result
 
         with patch.object(drive.HandGuidingController, "update", request_stop), redirect_stdout(io.StringIO()):
-            drive.run(side="both", enable=True)
+            drive.run(side="both")
         for bus in self.virtual.values():
             self.assertTrue(bus.closed)
             self.assertEqual(set(bus.modes.values()), {2})
@@ -465,11 +522,11 @@ class LifecycleTests(unittest.TestCase):
     def test_second_run_keeps_gravity_support_and_does_not_reenable_running_arm(self):
         self.setup_run()
         with redirect_stdout(io.StringIO()):
-            drive.run(side="right", enable=True, duration=.025)
+            drive.run(side="right", duration=.025)
         bus = self.virtual["can1"]
         bus.sent.clear()
         with redirect_stdout(io.StringIO()):
-            drive.run(side="right", enable=True, duration=.025)
+            drive.run(side="right", duration=.025)
         kinds = [(m.arbitration_id >> 24) & 31 for m in bus.sent]
         self.assertNotIn(3, kinds)
         self.assertNotIn(4, kinds)
@@ -488,7 +545,7 @@ class LifecycleTests(unittest.TestCase):
         keys = MagicMock()
         keys.__enter__.return_value.pressed.return_value = True
         with patch.object(drive, "StopKey", return_value=keys), redirect_stdout(io.StringIO()):
-            drive.run(side="both", enable=True)
+            drive.run(side="both")
         for bus in self.virtual.values():
             self.assertEqual(set(bus.modes.values()), {2})
             self.assertFalse(any((m.arbitration_id >> 24) & 31 == 4 for m in bus.sent))
@@ -524,6 +581,14 @@ class LifecycleTests(unittest.TestCase):
                 patch.object(rebot_home.time, "monotonic", now), \
                 patch.object(rebot_home.time, "sleep", sleep), redirect_stdout(io.StringIO()):
             rebot_home.home(side="both")
+        journals = list(self.journal_dir.glob("home-*.jsonl"))
+        self.assertEqual(len(journals), 1)
+        rows = [json.loads(line) for line in journals[0].read_text().splitlines()]
+        self.assertEqual(rows[0]["control"], "native_mit")
+        self.assertEqual(rows[0]["speed"], .3)
+        samples = [row for row in rows if row["type"] == "sample"]
+        self.assertEqual({row["side"] for row in samples}, {"left", "right"})
+        self.assertTrue(all("native_parameters" in row and "cycle_s" in row for row in samples))
         for bus in self.virtual.values():
             self.assertTrue(bus.closed)
             self.assertEqual(set(bus.modes.values()), {2})
@@ -553,9 +618,47 @@ class LifecycleTests(unittest.TestCase):
         self.assertGreaterEqual(clock[0], 12)
         self.assertNotIn("Home reached", output.getvalue())
         bus = self.virtual["can1"]
+        frames = [msg for msg in bus.sent if (msg.arbitration_id >> 24) & 31 == 1]
+        decoded = [mit.decode_mit(msg, self.arms["right"]["models"][(msg.arbitration_id & 255)-1])
+                   for msg in frames]
+        self.assertTrue(all(item["kp"] > 0 and item["kd"] > 0 for item in decoded))
+        self.assertTrue(any(item["velocity"] < -.005 for item in decoded))
         self.assertTrue(bus.closed)
         self.assertEqual(set(bus.modes.values()), {2})
         self.assertFalse(any((m.arbitration_id >> 24) & 31 == 4 for m in bus.sent))
+
+    def test_home_starts_from_enabled_target_without_feedback_reset(self):
+        self.setup_run()
+        clock, reads, targets = [0.], [0], []
+        original = mit.MotorBus.command_position
+
+        def now():
+            clock[0] += .00001
+            return clock[0]
+
+        def sleep(duration):
+            clock[0] += duration
+
+        def positions(bus):
+            reads[0] += 1
+            return [.2 if reads[0] == 1 else .23 if reads[0] == 2 else .24] * 6
+
+        def command(bus, positions, *args):
+            targets.append(np.array(positions))
+            return original(bus, positions, *args)
+
+        keys = MagicMock()
+        keys.__enter__.return_value.pressed.side_effect = lambda: clock[0] > .2
+        with patch.object(rebot_home, "load_config", return_value=self.arms), \
+                patch.object(rebot_home, "resolve_channel", side_effect=lambda arm: arm["channel"]), \
+                patch.object(rebot_home, "StopKey", return_value=keys), \
+                patch.object(rebot_home.time, "monotonic", now), \
+                patch.object(rebot_home.time, "sleep", sleep), \
+                patch.object(mit.MotorBus, "positions", positions), \
+                patch.object(mit.MotorBus, "command_position", command), redirect_stdout(io.StringIO()):
+            rebot_home.home(side="right")
+        self.assertTrue(targets)
+        np.testing.assert_allclose(targets[0], [.23] * 6, atol=.0001)
 
 
 class DisableIsolationTests(unittest.TestCase):

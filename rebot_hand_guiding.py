@@ -15,13 +15,12 @@ import time
 
 import can
 import numpy as np
-import pinocchio as pin
 import yaml
 
 from rebot import CONFIG, load_config, resolve_channel, verify_identity
 from rebot_mit import MotorBus
+from rebot_gravity import GravityModel, vector
 
-MODEL_PATH = Path(__file__).with_name("models") / "rebot_rs_dynamics.urdf"
 SETTINGS_PATH = Path(__file__).with_suffix(".yaml")
 VECTOR_KEYS = {"hold_kp", "damping", "torque_limit_nm", "gravity_scale"}
 SCALAR_KEYS = {"rate_hz", "max_sample_gap_s", "max_feedback_age_s",
@@ -56,13 +55,6 @@ class StopKey:
             termios.tcsetattr(self.fd, termios.TCSADRAIN, self.saved)
 
 
-def vector(value, name):
-    result = np.asarray(value, dtype=float)
-    if result.shape != (6,) or not np.all(np.isfinite(result)):
-        raise ValueError(f"{name} must contain six finite values.")
-    return result
-
-
 def load_settings(path=SETTINGS_PATH):
     settings = yaml.safe_load(path.read_text())
     expected = VECTOR_KEYS | SCALAR_KEYS
@@ -86,27 +78,6 @@ def load_settings(path=SETTINGS_PATH):
             or np.any(settings["damping"] > 5)):
         raise ValueError("Settings exceed experimental limits or have inconsistent thresholds.")
     return settings
-
-
-class GravityModel:
-    def __init__(self, path=MODEL_PATH):
-        full = pin.buildModelFromUrdf(str(path))
-        finger_ids = [i for i, name in enumerate(full.names)
-                      if i and name not in [f"joint{j}" for j in range(1, 7)]]
-        self.model = pin.buildReducedModel(full, finger_ids, pin.neutral(full))
-        if list(self.model.names)[1:] != [f"joint{i}" for i in range(1, 7)]:
-            raise ValueError("Expected six ordered RS arm joints in dynamics model.")
-        self.data = self.model.createData()
-        self.lower = self.model.lowerPositionLimit.copy()
-        self.upper = self.model.upperPositionLimit.copy()
-
-    def gravity(self, q):
-        return pin.computeGeneralizedGravity(self.model, self.data, vector(q, "q")).copy()
-
-    def validate(self, q):
-        q = vector(q, "q")
-        if np.any(q < self.lower - 0.03) or np.any(q > self.upper + 0.03):
-            raise ValueError("Joint pose is outside model limits; check software zero and physical pose.")
 
 
 @dataclass
@@ -179,13 +150,15 @@ class HandGuidingController:
         return Command(torque, gravity, self.state)
 
 
-def run(config=CONFIG, settings_path=SETTINGS_PATH, side="right", enable=False,
-        duration=0.0, gravity_scale=1.0):
+def run(config=CONFIG, settings_path=SETTINGS_PATH, side="right",
+        duration=0.0, gravity_scale=1.0, calibration=None):
     if not math.isfinite(duration) or duration < 0:
         raise ValueError("Duration must be finite and nonnegative; 0 runs until Ctrl-C.")
     if not math.isfinite(gravity_scale) or not 0 < gravity_scale <= 1:
         raise ValueError("Gravity scale must be greater than 0 and at most 1.")
     cfg = load_settings(settings_path)
+    if calibration is not None:
+        cfg["gravity_scale"] = np.ones(6)
     arms = load_config(config)
     sides = ("left", "right") if side == "both" else (side,)
     if any(name not in arms or "reference_rad" not in arms[name] for name in sides):
@@ -196,7 +169,8 @@ def run(config=CONFIG, settings_path=SETTINGS_PATH, side="right", enable=False,
     if len(sides) == 2 and (set(arms["left"]["motor_uids"].values())
                            & set(arms["right"]["motor_uids"].values())):
         raise ValueError("Selected arms have overlapping motor UIDs.")
-    controllers = {name: HandGuidingController(GravityModel(), cfg) for name in sides}
+    controllers = {name: HandGuidingController(
+        GravityModel(calibration=calibration, arm=arms[name], side=name), cfg) for name in sides}
     references = {name: np.asarray(arms[name]["reference_rad"][:6]) for name in sides}
     stop_requested = False
 
@@ -208,7 +182,7 @@ def run(config=CONFIG, settings_path=SETTINGS_PATH, side="right", enable=False,
                    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)}
     try:
         with ExitStack() as stack:
-            stop_key = stack.enter_context(StopKey()) if enable else None
+            stop_key = stack.enter_context(StopKey())
             buses, raw = {}, {}
             for name in sides:
                 buses[name] = stack.enter_context(MotorBus(
@@ -221,44 +195,39 @@ def run(config=CONFIG, settings_path=SETTINGS_PATH, side="right", enable=False,
                 gravity = model.gravity(q) * cfg["gravity_scale"] * gravity_scale
                 if np.any(np.abs(gravity) > cfg["torque_limit_nm"]):
                     raise RuntimeError(f"{name}: gravity torque exceeds configured limits.")
-                if enable:
-                    buses[name].set_hold(raw[name], gravity, cfg["hold_kp"], cfg["damping"])
-                    buses[name].hold_gravity = (
-                        lambda positions, model=model, reference=references[name]: np.clip(
-                            model.gravity(np.asarray(positions) - reference)
-                            * cfg["gravity_scale"] * gravity_scale,
-                            -cfg["torque_limit_nm"], cfg["torque_limit_nm"]))
+                buses[name].set_hold(raw[name], gravity, cfg["hold_kp"], cfg["damping"])
+                buses[name].hold_gravity = (
+                    lambda positions, model=model, reference=references[name]: np.clip(
+                        model.gravity(np.asarray(positions) - reference)
+                        * cfg["gravity_scale"] * gravity_scale,
+                        -cfg["torque_limit_nm"], cfg["torque_limit_nm"]))
                 print(f"{name}: verified {channels[name]}; predicted gravity (N*m): "
                       + " ".join(f"{x:+.3f}" for x in gravity), flush=True)
-            if enable:
-                print("ACTIVE MIT: support the selected arms during startup and exit. "
-                      "Space, Esc, Q or Ctrl-C: soft stop and native position hold. "
-                      "Exit keeps motors enabled; no automatic homing. Gripper is unchanged.", flush=True)
-                for name in sides:
-                    buses[name].prepare()
-                    if stop_requested:
-                        return
-                # Re-read after setup, before enabling. Never target zero.
-                for name in sides:
-                    if stop_requested:
-                        return
-                    raw[name] = np.asarray(buses[name].positions())
-                    q = raw[name] - references[name]
-                    controllers[name].model.validate(q)
-                    gravity = controllers[name].model.gravity(q) * cfg["gravity_scale"] * gravity_scale
-                    if np.any(np.abs(gravity) > cfg["torque_limit_nm"]):
-                        raise RuntimeError(f"{name}: gravity torque exceeds limits before takeover.")
-                    buses[name].set_hold(raw[name], gravity, cfg["hold_kp"], cfg["damping"])
-                    buses[name].enable(raw[name])
-            else:
-                print("READ-ONLY CHECK: no mode changes, enable/disable, watchdog writes, "
-                      "or torque commands. Add --enable only after single-arm checks.", flush=True)
+            print("ACTIVE MIT: support the selected arms during startup and exit. "
+                  "Space, Esc, Q or Ctrl-C: soft stop and native position hold. "
+                  "Exit keeps motors enabled; no automatic homing. Gripper is unchanged.", flush=True)
+            for name in sides:
+                buses[name].prepare()
+                if stop_requested:
+                    return
+            # Re-read after setup, before enabling. Never target zero.
+            for name in sides:
+                if stop_requested:
+                    return
+                raw[name] = np.asarray(buses[name].positions())
+                q = raw[name] - references[name]
+                controllers[name].model.validate(q)
+                gravity = controllers[name].model.gravity(q) * cfg["gravity_scale"] * gravity_scale
+                if np.any(np.abs(gravity) > cfg["torque_limit_nm"]):
+                    raise RuntimeError(f"{name}: gravity torque exceeds limits before takeover.")
+                buses[name].set_hold(raw[name], gravity, cfg["hold_kp"], cfg["damping"])
+                buses[name].enable(raw[name])
             started = time.monotonic()
             next_log = started
             states = {}
             while not stop_requested and (not duration or time.monotonic() - started < duration):
                 tick = time.monotonic()
-                if stop_key is not None and stop_key.pressed():
+                if stop_key.pressed():
                     stop_requested = True
                     break
                 commands, sampled = {}, {}
@@ -271,13 +240,12 @@ def run(config=CONFIG, settings_path=SETTINGS_PATH, side="right", enable=False,
                         commands[name] = controllers[name].update(q, time.monotonic(), gravity_scale)
                     except (ValueError, RuntimeError) as exc:
                         raise RuntimeError(f"{name}: {exc}") from exc
-                    if enable:
-                        buses[name].set_hold(raw[name], commands[name].gravity,
-                                             cfg["hold_kp"], cfg["damping"])
+                    buses[name].set_hold(raw[name], commands[name].gravity,
+                                         cfg["hold_kp"], cfg["damping"])
                 for name in sides:
                     if time.monotonic() - sampled[name] > cfg["max_feedback_age_s"]:
                         raise RuntimeError(f"{name}: feedback too old to apply torque.")
-                if enable and not stop_requested:
+                if not stop_requested:
                     for name in sides:
                         if time.monotonic() - sampled[name] > cfg["max_feedback_age_s"]:
                             raise RuntimeError(f"{name}: feedback became stale before command.")
@@ -301,12 +269,13 @@ def main():
     parser.add_argument("--config", type=Path, default=CONFIG)
     parser.add_argument("--settings", type=Path, default=SETTINGS_PATH)
     parser.add_argument("--side", choices=("left", "right", "both"), default="right")
-    parser.add_argument("--enable", action="store_true", help="Enable physical joints 1-6 and send torque")
     parser.add_argument("--duration", type=float, default=0, help="Seconds to run; 0 until Ctrl-C")
     parser.add_argument("--gravity-scale", type=float, default=1.0, help="Additional gravity scaling (0, 1]")
+    parser.add_argument("--calibration", type=Path, help="Accepted robot-bound gravity calibration YAML")
     args = parser.parse_args()
     try:
-        run(args.config, args.settings, args.side, args.enable, args.duration, args.gravity_scale)
+        run(config=args.config, settings_path=args.settings, side=args.side,
+            duration=args.duration, gravity_scale=args.gravity_scale, calibration=args.calibration)
         return 0
     except (OSError, ValueError, RuntimeError, ImportError, can.CanError, yaml.YAMLError,
             subprocess.SubprocessError) as exc:

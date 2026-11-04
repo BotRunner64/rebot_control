@@ -2,3 +2,5 @@ __pycache__/
 *.py[cod]
 stararm.local.yaml
 rebot.local.yaml
+calibration_runs/
+motion_runs/
