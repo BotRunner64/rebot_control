@@ -196,8 +196,7 @@ class MotorBus:
         modes = {motor: self.read_parameter(motor, MODE, "b") for motor in self.motor_ids}
         if any(mode != 0 for mode in modes.values()):
             raise ValueError(f"{self.channel}: motors must already be in MIT mode. "
-                             "Use rebot_disable.py --prepare-mit"
-                             f"{' --gripper' if 7 in self.motor_ids else ''} manually while supported.")
+                             "Use rebot_disable.py --prepare-mit manually while supported.")
         for motor in self.motor_ids:
             # Explicit user policy: a normal host exit must not reset the motors.
             # Native position hold is installed before closing an active bus.

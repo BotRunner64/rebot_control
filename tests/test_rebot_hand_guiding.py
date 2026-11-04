@@ -553,7 +553,7 @@ class LifecycleTests(unittest.TestCase):
     def test_explicit_manual_script_is_the_only_disable_path(self):
         self.setup_run()
         for bus in self.virtual.values():
-            bus.modes = dict.fromkeys(range(1, 7), 2)
+            bus.modes = dict.fromkeys(range(1, 8), 2)
         with patch.object(rebot_disable, "load_config", return_value=self.arms), \
                 patch.object(rebot_disable, "resolve_channel", side_effect=lambda arm: arm["channel"]), \
                 redirect_stdout(io.StringIO()):
@@ -561,7 +561,8 @@ class LifecycleTests(unittest.TestCase):
         for bus in self.virtual.values():
             self.assertTrue(bus.closed)
             self.assertEqual(set(bus.modes.values()), {0})
-            self.assertTrue(any((m.arbitration_id >> 24) & 31 == 4 for m in bus.sent))
+            self.assertEqual({m.arbitration_id & 255 for m in bus.sent
+                              if (m.arbitration_id >> 24) & 31 == 4}, set(range(1, 8)))
 
     def test_manual_home_completion_keeps_motors_enabled(self):
         self.setup_run()

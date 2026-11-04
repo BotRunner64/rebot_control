@@ -330,16 +330,20 @@ class TeleopLifecycleTests(unittest.TestCase):
         self.assertFalse(self.commands)
         self.assert_holding()
 
-    def test_manual_disable_can_prepare_gripper_explicitly(self):
+    def test_manual_disable_prepares_all_seven_motors(self):
         self.run_teleop(side="right")
         # A fresh virtual CAN socket stands in for a separately invoked CLI.
         self.virtual["can1"].closed = False
+        for motor in range(1, 8):
+            self.virtual["can1"].params[(motor, mit.MODE)] = 1
         with patch.object(rebot_disable, "load_config", return_value=self.arms), \
                 patch.object(rebot_disable, "resolve_channel", side_effect=lambda arm: arm["channel"]), \
                 redirect_stdout(io.StringIO()):
-            self.assertTrue(rebot_disable.disable(side="right", prepare_mit=True, gripper=True))
+            self.assertTrue(rebot_disable.disable(side="right", prepare_mit=True))
         self.assertEqual(set(self.virtual["can1"].modes.values()), {0})
-        self.assertEqual(self.virtual["can1"].params[(7, mit.MODE)], 0)
+        self.assertTrue(all(self.virtual["can1"].params[(motor, mit.MODE)] == 0
+                            for motor in range(1, 8)))
+        self.assertFalse(self.virtual["can0"].sent)
 
     def test_cli_defaults_to_both_with_grippers(self):
         with patch.object(teleop.sys, "argv", ["rebot_teleop.py"]), patch.object(teleop, "teleop") as run:

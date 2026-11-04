@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Explicit manual motor disable. This module is never imported by control scripts."""
+"""Explicitly disable all seven motors per selected arm, including the gripper."""
 
 import argparse
 from contextlib import ExitStack
@@ -14,7 +14,7 @@ from rebot import CONFIG, load_config, resolve_channel, verify_identity
 from rebot_mit import MODE, MotorBus
 
 
-def disable(config=CONFIG, side="right", prepare_mit=False, gripper=False):
+def disable(config=CONFIG, side="right", prepare_mit=False):
     arms = load_config(config)
     sides = ("left", "right") if side == "both" else (side,)
     if any(name not in arms for name in sides):
@@ -22,14 +22,15 @@ def disable(config=CONFIG, side="right", prepare_mit=False, gripper=False):
     channels = {name: resolve_channel(arms[name]) for name in sides}
     if len(set(channels.values())) != len(sides):
         raise ValueError("Selected arms must use distinct CAN interfaces.")
-    print("MANUAL DISABLE: selected arms will lose motor support. "
+    print("MANUAL DISABLE: all seven motors per selected arm, including the gripper, "
+          "will lose motor support. "
           "Place them on a support before running this command.", flush=True)
     success = True
-    motors = range(1, 8 if gripper else 7)
+    motors = range(1, 8)
     with ExitStack() as stack:
         buses = {}
         for name in sides:
-            buses[name] = stack.enter_context(MotorBus(channels[name], arms[name]["models"]))
+            buses[name] = stack.enter_context(MotorBus(channels[name], arms[name]["models"], motor_count=7))
             verify_identity(buses[name], arms[name])
         # The only physical disable commands in these experimental control tools
         # live here, behind an explicit invocation of this standalone script.
@@ -60,10 +61,9 @@ def main():
     parser.add_argument("--side", choices=("left", "right", "both"), default="right")
     parser.add_argument("--prepare-mit", action="store_true",
                         help="After confirming manual disable, set and verify MIT mode")
-    parser.add_argument("--gripper", action="store_true", help="Also disable or prepare gripper motor 7")
     args = parser.parse_args()
     try:
-        return 0 if disable(args.config, args.side, args.prepare_mit, args.gripper) else 2
+        return 0 if disable(args.config, args.side, args.prepare_mit) else 2
     except (OSError, ValueError, RuntimeError, can.CanError, yaml.YAMLError,
             subprocess.SubprocessError) as exc:
         print(str(exc), file=sys.stderr)
