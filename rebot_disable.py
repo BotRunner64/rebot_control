@@ -11,10 +11,10 @@ import can
 import yaml
 
 from rebot import CONFIG, load_config, resolve_channel, verify_identity
-from rebot_mit import MODE, MotorBus
+from rebot_mit import MotorBus
 
 
-def disable(config=CONFIG, side="right", prepare_mit=False):
+def disable(config=CONFIG, side="right"):
     arms = load_config(config)
     sides = ("left", "right") if side == "both" else (side,)
     if any(name not in arms for name in sides):
@@ -46,8 +46,6 @@ def disable(config=CONFIG, side="right", prepare_mit=False):
             for motor in motors:
                 try:
                     bus.transaction(motor, 2, lambda: bus.send(4, motor), expected_mode=0)
-                    if prepare_mit:
-                        bus.write_parameter(motor, MODE, 0, "b")
                     print(f"{name} motor {motor}: disable confirmed.", flush=True)
                 except Exception as exc:
                     success = False
@@ -59,11 +57,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default=CONFIG)
     parser.add_argument("--side", choices=("left", "right", "both"), default="right")
-    parser.add_argument("--prepare-mit", action="store_true",
-                        help="After confirming manual disable, set and verify MIT mode")
     args = parser.parse_args()
     try:
-        return 0 if disable(args.config, args.side, args.prepare_mit) else 2
+        return 0 if disable(args.config, args.side) else 2
     except (OSError, ValueError, RuntimeError, can.CanError, yaml.YAMLError,
             subprocess.SubprocessError) as exc:
         print(str(exc), file=sys.stderr)
