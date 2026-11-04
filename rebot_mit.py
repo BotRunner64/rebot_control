@@ -120,9 +120,11 @@ class MotorBus:
             self.states[motor] = mode
             if motor in self.motor_ids:
                 limits = LIMITS[self.models[motor - 1]]
-                _, velocity, torque, _ = struct.unpack(">HHHH", frame.data)
+                position, velocity, torque, _ = struct.unpack(">HHHH", frame.data)
                 self.feedback[motor] = {
                     "timestamp": frame.timestamp,
+                    "received_at": time.monotonic(),
+                    "position": position / 65535 * 2 * limits.position - limits.position,
                     "velocity": velocity / 65535 * 2 * limits.velocity - limits.velocity,
                     "torque": torque / 65535 * 2 * limits.torque - limits.torque,
                     "temperature": temperature,
@@ -190,6 +192,18 @@ class MotorBus:
         if any(not math.isfinite(q) or abs(q) > 4 * math.pi for q in positions):
             raise ValueError(f"{self.channel}: invalid mechanical positions.")
         return positions
+
+    def feedback_positions(self, max_age_s):
+        """Read fresh running-state MIT feedback without extra CAN queries."""
+        now = time.monotonic()
+        values = []
+        for motor in self.motor_ids:
+            feedback = self.feedback.get(motor)
+            if (feedback is None or self.states.get(motor) != 2
+                    or not 0 <= now - feedback["received_at"] <= max_age_s):
+                raise TimeoutError(f"{self.channel} motor {motor}: MIT position feedback is stale or not running.")
+            values.append(feedback["position"])
+        return values
 
     def prepare(self):
         # Never stop motors or switch a running motor's mode automatically.

@@ -3,6 +3,10 @@
 from contextlib import redirect_stderr, redirect_stdout
 import io
 import math
+import multiprocessing as mp
+import os
+import queue
+import time
 import signal
 import struct
 import unittest
@@ -11,10 +15,11 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 
 import rebot_disable
-import rebot_gravity
 import rebot_mit as mit
 import rebot_teleop as teleop
 from test_rebot_hand_guiding import VirtualMotors, reply
+from teleop_process_fakes import BusFactory, SourceFactory, MeasuredMotors
+from rebot_teleop_runtime import SharedFrame, fresh, LoopTiming
 
 
 class MappingTests(unittest.TestCase):
@@ -31,341 +36,265 @@ class MappingTests(unittest.TestCase):
             teleop.map_target([float("nan")] * 7, reference, low, high)
 
 
-class TeleopLifecycleTests(unittest.TestCase):
+class SharedFrameTests(unittest.TestCase):
     def setUp(self):
-        self.virtual = {"can0": VirtualMotors(), "can1": VirtualMotors(100)}
-        for bus in self.virtual.values():
-            bus.params[(7, mit.WATCHDOG)] = 4000
-            bus.params[(7, mit.MODE)] = 0
-            bus.modes[7] = 0
-        self.arms = {name: dict(channel=channel, models=["rs-06"] * 3 + ["rs-00"] * 4,
-                                reference_rad=[.2] * 7, motor_uids=self.virtual[channel].uids)
-                     for name, channel in (("left", "can0"), ("right", "can1"))}
-        self.leaders = {name: dict(port=f"/dev/fake-{name}", baudrate=1000000, reference_deg=[10.] * 7)
-                        for name in ("left", "right")}
-        self.clock, self.commands, self.serials = 0., [], []
-        self.stop_after = 4
-        self.signal_handlers = {}
+        self.context = mp.get_context("spawn")
 
-        def serial_port(port, **kwargs):
-            uart = MagicMock()
-            uart.port = port
-            uart.__enter__.return_value = uart
-            self.serials.append(uart)
-            return uart
+    def test_latest_snapshot_overwrites_without_queueing_and_preserves_source_age(self):
+        frame = SharedFrame(self.context, 2)
+        source_at = time.monotonic() - .04
+        frame.publish([1, 2], source_at)
+        frame.publish([3, 4], source_at)
+        values, published, acquired = frame.read()
+        np.testing.assert_array_equal(values, [3, 4])
+        self.assertGreater(published, acquired)
+        self.assertEqual(acquired, source_at)
+        with self.assertRaisesRegex(TimeoutError, "stale"):
+            fresh(frame, time.monotonic(), .02, "Source")
 
-        def now():
-            self.clock += .00001
-            return self.clock
+    def test_unpublished_invalid_and_abandoned_locked_frames_are_bounded(self):
+        frame = SharedFrame(self.context, 2)
+        with self.assertRaises(TimeoutError):
+            fresh(frame, time.monotonic(), .1, "Missing")
+        with self.assertRaises(ValueError):
+            frame.publish([math.nan, 2], time.monotonic())
+        frame.lock.acquire()
+        try:
+            began = time.monotonic()
+            with self.assertRaisesRegex(TimeoutError, "lock"):
+                frame.read()
+            self.assertLess(time.monotonic() - began, .2)
+        finally:
+            frame.lock.release()
 
-        def sleep(duration):
-            self.clock += duration
+    def test_official_limits_apply_to_targets_and_feedback_without_old_model_limit(self):
+        arm = {"reference_rad": [.2] * 7, "models": ["rs-06"] * 3 + ["rs-00"] * 4}
+        reference, low, high = teleop.position_bounds(arm, 7, 270)
+        np.testing.assert_allclose(np.degrees(low), [-145, 0, 0, -80, -90, -130, 0])
+        np.testing.assert_allclose(np.degrees(high), [145, 170, 200, 90, 90, 130, 270])
+        q = reference.copy()
+        q[2] += math.radians(190)
+        teleop.validate_pose(q, reference, low, high)
+        q[5] += math.radians(140)
+        with self.assertRaisesRegex(ValueError, r"J6: relative=140\.00 deg, limits=\[-130\.00, 130\.00\] deg"):
+            teleop.validate_pose(q, reference, low, high)
 
-        original_command = mit.MotorBus.command_position
+    def test_timing_skips_missed_ticks_instead_of_bursting_commands(self):
+        stop = MagicMock()
+        with patch("rebot_teleop_runtime.time.monotonic", return_value=1.):
+            timing = LoopTiming("motor", 200)
+        with patch("rebot_teleop_runtime.time.monotonic", return_value=1.022):
+            timing.pace(stop)
+        self.assertEqual(timing.skipped, 4)
+        self.assertAlmostEqual(stop.wait.call_args.args[0], .003)
 
-        def command(bus, positions, velocities, gravity, kp, kd, deadline):
-            self.commands.append(dict(channel=bus.channel, position=np.array(positions),
-                                      velocity=np.array(velocities), gravity=np.array(gravity),
-                                      kp=np.array(kp), kd=np.array(kd), deadline=deadline, now=self.clock))
-            return original_command(bus, positions, velocities, gravity, kp, kd, deadline)
 
-        def signals(sig, handler):
-            self.signal_handlers[sig] = handler
-            return signal.SIG_DFL
+class ProcessLifecycleTests(unittest.TestCase):
+    def setUp(self):
+        self.context = mp.get_context("spawn")
+        self.counts = self.context.Array("i", 2)
+        self.hardware_reports = self.context.Queue()
+        self.arms = {side: {"reference_rad": [.2] * 7, "models": ["rs-06"] * 3 + ["rs-00"] * 4,
+                            "motor_uids": MeasuredMotors(offset).uids}
+                     for side, offset in (("left", 0), ("right", 100))}
+        self.leaders = {side: {"port": f"fake-{side}", "baudrate": 1000000, "reference_deg": [10.] * 7}
+                        for side in ("left", "right")}
+        self.snapshots = []
+        self.addCleanup(self.hardware_reports.join_thread)
+        self.addCleanup(self.hardware_reports.close)
 
-        self.keys = MagicMock()
-        self.keys.__enter__.return_value.pressed.side_effect = lambda: len(self.commands) >= self.stop_after
-        patches = [patch.object(mit, "check_channel"),
-                   patch.object(rebot_gravity.GravityModel, "gravity", side_effect=AssertionError("Gravity is disabled during teleoperation")),
-                   patch.object(mit.can, "Bus", side_effect=lambda **kw: self.virtual[kw["channel"]]),
-                   patch.object(teleop, "load_config", return_value=self.arms),
-                   patch.object(teleop, "load_leaders", return_value=self.leaders),
-                   patch.object(teleop, "resolve_channel", side_effect=lambda arm: arm["channel"]),
-                   patch.object(teleop.serial, "Serial", side_effect=serial_port),
-                   patch.object(teleop, "UartServoManager", side_effect=lambda uart: uart),
-                   patch.object(teleop, "read_angles", return_value=[30.] * 7),
-                   patch.object(teleop, "release_torque"),
-                   patch.object(teleop, "StopKey", return_value=self.keys),
-                   patch.object(teleop.time, "monotonic", now),
-                   patch.object(teleop.time, "sleep", sleep),
-                   patch.object(teleop.signal, "signal", side_effect=signals),
-                   patch.object(mit.MotorBus, "command_position", command)]
-        for item in patches:
-            item.start()
-            self.addCleanup(item.stop)
+    def run_teleop(self, failure="", stall=False, side="both", gripper=True, signal_stop=False):
+        sides = ("left", "right") if side == "both" else (side,)
+        channels = {name: "can0" if name == "left" else "can1" for name in sides}
+        keys = MagicMock()
+        began = time.monotonic()
 
-    def run_teleop(self, **kwargs):
-        with redirect_stdout(io.StringIO()):
-            return teleop.teleop(**kwargs)
+        def pressed():
+            done = (not failure and not stall and sum(self.counts) >= 12) or time.monotonic() - began > 8
+            if done and signal_stop:
+                os.kill(os.getpid(), signal.SIGTERM)
+                return False
+            return done
+
+        keys.__enter__.return_value.pressed.side_effect = pressed
+        try:
+            with patch.object(teleop, "load_bindings", return_value=(sides, self.arms, self.leaders, channels)), \
+                    patch.object(teleop, "StopKey", return_value=keys), \
+                    redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                return teleop.teleop(side=side, gripper=gripper, startup_timeout=8, shutdown_timeout=3,
+                    source_factory=SourceFactory(self.hardware_reports, stall),
+                    bus_factory=BusFactory(self.hardware_reports, self.counts, failure))
+        finally:
+            while True:
+                try:
+                    self.snapshots.append(self.hardware_reports.get(timeout=.1))
+                except queue.Empty:
+                    break
+            self.assertFalse([p for p in mp.active_children()
+                              if p.name.startswith(("leader-", "motor-")) or p.name == "target"])
 
     def assert_holding(self, channels=("can0", "can1"), count=7):
+        motors = {record["channel"]: record for record in self.snapshots if record["kind"] == "motor"}
         for channel in channels:
-            bus = self.virtual[channel]
-            self.assertTrue(bus.closed)
-            self.assertTrue(all(bus.modes[i] == 2 for i in range(1, count + 1)))
-            self.assertTrue(all(bus.params[(i, mit.WATCHDOG)] == 0 for i in range(1, count + 1)))
-            self.assertFalse(any((m.arbitration_id >> 24) & 31 in (4, 6, 7, 22, 23, 25) for m in bus.sent))
-            last = [m for m in bus.sent if (m.arbitration_id >> 24) & 31 == 1][-count:]
-            self.assertEqual({m.arbitration_id & 255 for m in last}, set(range(1, count + 1)))
-            for message in last:
-                native = mit.decode_mit(message, self.arms["left"]["models"][(message.arbitration_id & 255)-1])
-                self.assertGreater(native["kp"], 0)
-                self.assertGreater(native["kd"], 0)
-                self.assertAlmostEqual(native["velocity"], 0, delta=.001)
+            record = motors[channel]
+            self.assertTrue(record["closed"])
+            self.assertEqual(record["enabled"], list(range(1, count + 1)))
+            self.assertTrue(all(record["modes"][i] == 2 for i in range(1, count + 1)))
+            self.assertNotIn(4, record["types"])
+            self.assertTrue(record["tau_zero"])
+            self.assertTrue(record["velocity_zero"])
+            for hold in record["hold"]:
+                self.assertGreater(hold["kp"], 0)
+                self.assertGreater(hold["kd"], 0)
+                self.assertAlmostEqual(hold["velocity"], 0, delta=.001)
+        return motors
 
-    def test_both_arms_send_mapped_positions_directly_and_hold_on_stop(self):
-        changed = [70, 50, -40, -50, 20, 100, 55]
-        with patch.object(teleop, "read_angles", side_effect=[[30.] * 7] * 4 + [changed] * 2):
-            self.run_teleop()
-        self.assertEqual(len(self.commands), 4)
-        for command in self.commands:
-            self.assertGreater(command["deadline"], command["now"])
-            np.testing.assert_array_equal(command["velocity"], np.zeros(7))
-        for channel in self.virtual:
-            commands = [c for c in self.commands if c["channel"] == channel]
-            # Both the first target and subsequent large changes are sent directly.
-            np.testing.assert_allclose(commands[0]["position"],
-                                       .2 + np.radians([20, 20, 0, -20, -20, 20, 120]))
-            np.testing.assert_allclose(commands[1]["position"],
-                                       .2 + np.radians([60, 40, 50, 60, -10, 90, 270]))
-        self.assert_holding()
-        for uart in self.serials:
-            uart.__exit__.assert_called_once()
+    def test_real_spawn_runs_independent_hardware_with_existing_mit_parameters(self):
+        messages = self.run_teleop()
+        motors = self.assert_holding()
+        pids = [r["pid"] for r in self.snapshots]
+        self.assertEqual(len(set(pids)), 4)
+        self.assertNotIn(os.getpid(), pids)
+        for record in motors.values():
+            self.assertGreater(record["calls"], 0)
+            self.assertEqual(record["position_queries"], 21)
+            np.testing.assert_allclose(record["first"], .2 + np.radians([20, 20, 0, -20, -20, 20, 120]))
+            np.testing.assert_allclose([p["kp"] for p in record["parameters"]],
+                                       [50, 150, 150, 50, 50, 50, 50], atol=.08)
+            np.testing.assert_allclose([p["kd"] for p in record["parameters"]],
+                                       [3, 10, 10, 5, 4, 4, 4], atol=.002)
+        rates = {r["worker"]: r for r in messages if r["type"] == "timing"}
+        self.assertEqual(rates["target"]["requested_hz"], 500)
+        self.assertEqual(rates["motor-left"]["requested_hz"], 200)
+        self.assertEqual(rates["motor-right"]["requested_hz"], 200)
+        self.assertGreater(rates["target"]["count"], 0)
 
-    def test_invalid_initial_gripper_pose_prevents_either_arm_enabling(self):
-        self.arms["right"]["reference_rad"][6] = .4
-        with self.assertRaisesRegex(ValueError, "follower pose.*limits"):
-            self.run_teleop()
-        self.assertFalse(any((m.arbitration_id >> 24) & 31 in (1, 3)
-                             for bus in self.virtual.values() for m in bus.sent))
-
-    def test_all_targets_are_clipped_to_official_limits(self):
-        high = [170, 200, -210, -100, -100, 170, 60]
-        low = [-150, -10, 30, 110, 120, -150, 0]
-        with patch.object(teleop, "read_angles", side_effect=[[30.] * 7] * 2 + [high] * 2 + [low] * 2):
-            self.run_teleop()
-        for channel in self.virtual:
-            commands = [c for c in self.commands if c["channel"] == channel]
-            np.testing.assert_allclose(commands[0]["position"],
-                                       .2 + np.radians([145, 170, 200, 90, 90, 130, 270]))
-            np.testing.assert_allclose(commands[1]["position"],
-                                       .2 + np.radians([-145, 0, 0, -80, -90, -130, 0]))
-        self.assert_holding()
-
-    def test_j3_feedback_above_old_model_limit_is_accepted(self):
-        original = mit.MotorBus.positions
-
-        def read(bus):
-            positions = original(bus)
-            positions[2] = .2 + math.radians(190)
-            return positions
-
-        with patch.object(mit.MotorBus, "positions", read):
-            self.run_teleop()
-        self.assertEqual(len(self.commands), 4)
-        self.assert_holding()
-
-    def test_initial_j6_pose_outside_official_limits_prevents_enabling(self):
-        original = mit.MotorBus.positions
-
-        def read(bus):
-            positions = original(bus)
-            positions[5] = .2 + math.radians(140)
-            return positions
-
-        with patch.object(mit.MotorBus, "positions", read):
-            with self.assertRaisesRegex(ValueError, "follower pose.*limits"):
-                self.run_teleop()
-        self.assertFalse(any((m.arbitration_id >> 24) & 31 in (1, 3)
-                             for bus in self.virtual.values() for m in bus.sent))
-
-    def test_gripper_opening_cannot_exceed_official_limit(self):
-        with self.assertRaisesRegex(ValueError, "official 270-degree limit"):
-            self.run_teleop(gripper_open_deg=300)
-        self.assertFalse(self.serials)
-
-    def test_feedback_gap_still_stops_after_speed_limiter_removal(self):
-        def delayed_tick(duration):
-            self.clock += .11
-
-        with patch.object(teleop.time, "sleep", delayed_tick):
-            with self.assertRaisesRegex(RuntimeError, "feedback gap"):
-                self.run_teleop()
-        self.assertEqual(len(self.commands), 2)
-        self.assert_holding()
-
-    def test_teleop_and_exit_hold_use_zero_feedforward_with_existing_gains(self):
-        self.run_teleop()
-        kp = [50, 150, 150, 50, 50, 50, 50]
-        kd = [3, 10, 10, 5, 4, 4, 4]
-        for command in self.commands:
-            np.testing.assert_array_equal(command["gravity"], np.zeros(7))
-            np.testing.assert_array_equal(command["kp"], kp)
-            np.testing.assert_array_equal(command["kd"], kd)
-        # Cover startup/adoption, following, and cleanup, including quantization.
-        for bus in self.virtual.values():
-            frames = [m for m in bus.sent if (m.arbitration_id >> 24) & 31 == 1]
-            self.assertTrue(frames)
-            for frame in frames:
-                index = (frame.arbitration_id & 255) - 1
-                self.assertEqual((frame.arbitration_id >> 8) & 65535, 32767)
-                native = mit.decode_mit(frame, self.arms["left"]["models"][index])
-                self.assertAlmostEqual(native["kp"], kp[index], delta=.08)
-                self.assertAlmostEqual(native["kd"], kd[index], delta=.002)
-        self.assert_holding()
-
-    def test_single_arm_no_gripper_never_writes_motor_seven(self):
+    def test_single_arm_without_gripper_owns_only_selected_hardware(self):
         self.run_teleop(side="right", gripper=False)
-        self.assert_holding(("can1",), count=6)
-        self.assertFalse(self.virtual["can0"].sent)
-        self.assertEqual(self.virtual["can1"].modes[7], 0)
-        self.assertTrue(all(len(c["position"]) == 6 for c in self.commands))
-        self.assertFalse(any((m.arbitration_id & 255) == 7 and (m.arbitration_id >> 24) & 31 != 0
-                             for m in self.virtual["can1"].sent))
+        motors = self.assert_holding(("can1",), 6)
+        self.assertEqual(len(self.snapshots), 2)
+        self.assertEqual(motors["can1"]["modes"][7], 0)
+        self.assertEqual(motors["can1"]["position_queries"], 18)
 
-    def test_partial_leader_loss_stops_both_without_another_target(self):
-        # Two startup reads, one valid paired tick, then a partial frame.
-        with patch.object(teleop, "read_angles", side_effect=[[30.] * 7] * 5 + [ValueError("Missing servo IDs [3]")]):
-            with self.assertRaisesRegex(ValueError, "Missing servo"):
-                self.run_teleop()
-        self.assertEqual(len(self.commands), 2)
+    def test_bad_uid_on_one_side_prevents_enabling_either_arm(self):
+        with self.assertRaisesRegex(RuntimeError, "UIDs"):
+            self.run_teleop(failure="uid")
+        motors = [r for r in self.snapshots if r["kind"] == "motor"]
+        self.assertTrue(motors)
+        self.assertTrue(all(not r["enabled"] for r in motors))
+        self.assertTrue(all(3 not in r["types"] for r in motors))
+
+    def test_wrong_mode_on_one_side_prevents_enabling_either_arm(self):
+        with self.assertRaisesRegex(RuntimeError, "MIT mode"):
+            self.run_teleop(failure="prepare")
+        self.assertTrue(all(not r["enabled"] for r in self.snapshots if r["kind"] == "motor"))
+
+    def test_missing_can_reply_stops_and_holds_both_arms(self):
+        with self.assertRaisesRegex(RuntimeError, "missing native motion feedback"):
+            self.run_teleop(failure="command")
         self.assert_holding()
 
-    def test_slow_leader_feedback_is_not_forwarded(self):
-        reads = 0
+    def test_partial_enable_failure_holds_touched_motors(self):
+        with self.assertRaisesRegex(RuntimeError, "mode 2"):
+            self.run_teleop(failure="enable")
+        records = {r["channel"]: r for r in self.snapshots if r["kind"] == "motor"}
+        self.assertTrue(all(r["closed"] for r in records.values()))
+        self.assertTrue(all(4 not in r["types"] for r in records.values()))
+        self.assertEqual(records["can1"]["enabled"], [1, 2, 3])
 
-        def read(bus):
-            nonlocal reads
-            reads += 1
-            if reads > 2:
-                self.clock += .09
-            return [30.] * 7
-
-        with patch.object(teleop, "read_angles", side_effect=read):
-            with self.assertRaisesRegex(TimeoutError, "Star Arm feedback is too old"):
-                self.run_teleop()
-        self.assertFalse(self.commands)
+    def test_slow_source_cannot_be_made_fresh_by_500hz_republication(self):
+        with self.assertRaisesRegex(RuntimeError, "stale"):
+            self.run_teleop(stall=True)
         self.assert_holding()
 
-    def test_slow_follower_read_prevents_sending_either_new_target(self):
-        reads = 0
-        original = mit.MotorBus.positions
+    def test_abrupt_motor_process_death_is_detected_and_peer_holds(self):
+        with self.assertRaisesRegex(RuntimeError, "exited unexpectedly"):
+            self.run_teleop(failure="crash")
+        self.assert_holding(("can0",))
 
-        def read(bus):
-            nonlocal reads
-            reads += 1
-            if reads == 5:
-                self.clock += .09
-            return original(bus)
-
-        with patch.object(mit.MotorBus, "positions", read):
-            with self.assertRaisesRegex(TimeoutError, "Paired teleoperation feedback deadline"):
-                self.run_teleop()
-        self.assertFalse(self.commands)
+    def test_parent_sigterm_performs_cooperative_hold_cleanup(self):
+        self.run_teleop(signal_stop=True)
         self.assert_holding()
 
-    def test_native_feedback_loss_stops_and_holds_both(self):
-        original = mit.MotorBus.command_position
-
-        def drop_gripper(bus, *args):
-            if bus.channel == "can1":
-                self.virtual[bus.channel].drop_holds.add(7)
-                try:
-                    return original(bus, *args)
-                finally:
-                    self.virtual[bus.channel].drop_holds.clear()
-            return original(bus, *args)
-
-        with patch.object(mit.MotorBus, "command_position", drop_gripper):
-            with self.assertRaisesRegex(TimeoutError, "missing native motion feedback.*7"):
-                self.run_teleop()
-        self.assert_holding()
-
-    def test_bad_second_uid_prevents_either_arm_enabling(self):
-        self.arms["right"]["motor_uids"] = dict(self.arms["right"]["motor_uids"])
-        self.arms["right"]["motor_uids"][7] = "ff" * 8
-        with self.assertRaisesRegex(ValueError, "UIDs"):
-            self.run_teleop()
-        for bus in self.virtual.values():
-            self.assertFalse(any((m.arbitration_id >> 24) & 31 in (1, 3) for m in bus.sent))
-
-    def test_invalid_binding_is_rejected_before_opening_devices(self):
-        for field, value in (("reference_deg", [math.nan] * 7), ("port", self.leaders["left"]["port"])):
-            original = self.leaders["right"][field]
-            self.leaders["right"][field] = value
-            with self.assertRaises(ValueError):
-                self.run_teleop()
-            self.leaders["right"][field] = original
-        self.assertFalse(self.serials)
-
-    def test_non_mit_gripper_is_rejected_before_enabling_either_arm(self):
-        self.virtual["can1"].params[(7, mit.MODE)] = 1
-        with self.assertRaisesRegex(ValueError, "MIT mode"):
-            self.run_teleop()
-        self.assertFalse(any((m.arbitration_id >> 24) & 31 in (1, 3)
-                             for bus in self.virtual.values() for m in bus.sent))
-
-    def test_partial_enable_failure_holds_every_motor_already_touched(self):
-        self.virtual["can1"].fail_enable = 3
-        with self.assertRaises(TimeoutError):
-            self.run_teleop()
-        self.assertTrue(all(bus.closed for bus in self.virtual.values()))
-        self.assertTrue(all(self.virtual["can0"].modes[i] == 2 for i in range(1, 8)))
-        self.assertTrue(all(self.virtual["can1"].modes[i] == 2 for i in (1, 2)))
-        self.assertFalse(any((m.arbitration_id >> 24) & 31 == 4
-                             for bus in self.virtual.values() for m in bus.sent))
-
-    def test_sigterm_stops_before_forwarding_new_targets(self):
-        reads = 0
-
-        def read(bus):
-            nonlocal reads
-            reads += 1
-            if reads == 3:
-                self.signal_handlers[signal.SIGTERM](signal.SIGTERM, None)
-            return [30.] * 7
-
-        with patch.object(teleop, "read_angles", side_effect=read):
-            self.run_teleop()
-        self.assertFalse(self.commands)
-        self.assert_holding()
-
-    def test_manual_disable_stops_all_seven_motors_without_changing_parameters(self):
-        self.run_teleop(side="right")
-        # A fresh virtual CAN socket stands in for a separately invoked CLI.
-        self.virtual["can1"].closed = False
-        self.virtual["can1"].sent.clear()
-        for motor in range(1, 8):
-            self.virtual["can1"].params[(motor, mit.MODE)] = 1
-        parameters = self.virtual["can1"].params.copy()
-        with patch.object(rebot_disable, "load_config", return_value=self.arms), \
-                patch.object(rebot_disable, "resolve_channel", side_effect=lambda arm: arm["channel"]), \
-                redirect_stdout(io.StringIO()):
-            self.assertTrue(rebot_disable.disable(side="right"))
-        self.assertEqual(set(self.virtual["can1"].modes.values()), {0})
-        self.assertEqual(self.virtual["can1"].params, parameters)
-        self.assertEqual({(message.arbitration_id >> 24) & 31
-                          for message in self.virtual["can1"].sent}, {0, 4})
-        self.assertFalse(self.virtual["can0"].sent)
-
-    def test_cli_defaults_to_both_with_grippers(self):
+    def test_cli_and_invalid_gripper_range(self):
         with patch.object(teleop.sys, "argv", ["rebot_teleop.py"]), patch.object(teleop, "teleop") as run:
             self.assertEqual(teleop.main(), 0)
             self.assertEqual(run.call_args.kwargs["side"], "both")
             self.assertTrue(run.call_args.kwargs["gripper"])
-
-    def test_cli_rejects_removed_speed_options(self):
+        with self.assertRaises(ValueError):
+            teleop.teleop(gripper_open_deg=300)
         for option in ("--speed", "--gripper-speed"):
             with self.subTest(option=option), \
                     patch.object(teleop.sys, "argv", ["rebot_teleop.py", option, "0.5"]), \
-                    patch.object(teleop, "teleop") as run, redirect_stderr(io.StringIO()), \
-                    self.assertRaises(SystemExit) as error:
+                    redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as error:
                 teleop.main()
             self.assertEqual(error.exception.code, 2)
-            run.assert_not_called()
+
+    def test_parent_heartbeat_loss_stops_workers_independently(self):
+        original = SharedFrame.publish
+
+        def publish(frame, values, source_at):
+            # This patch runs only in the supervisor: spawn starts fresh interpreters.
+            if frame.size == 0 and sum(self.counts) >= 8:
+                return
+            return original(frame, values, source_at)
+
+        with patch.object(SharedFrame, "publish", publish):
+            with self.assertRaisesRegex(RuntimeError, "Supervisor heartbeat"):
+                self.run_teleop(failure="heartbeat")
+        self.assert_holding()
+
+
+class BindingAndDisableTests(unittest.TestCase):
+    def test_invalid_bindings_are_rejected_before_workers_start(self):
+        arms = {name: {"reference_rad": [0.] * 7,
+                       "motor_uids": MeasuredMotors(offset).uids, "channel": name}
+                for name, offset in (("left", 0), ("right", 100))}
+        leaders = {name: {"port": f"fake-{name}", "reference_deg": [0.] * 7} for name in arms}
+        with patch.object(teleop, "load_config", return_value=arms), \
+                patch.object(teleop, "load_leaders", return_value=leaders), \
+                patch.object(teleop, "resolve_channel", side_effect=lambda arm: arm["channel"]):
+            leaders["right"]["reference_deg"][0] = math.nan
+            with self.assertRaises(ValueError):
+                teleop.load_bindings(None, None, "both")
+            leaders["right"]["reference_deg"][0] = 0
+            leaders["right"]["port"] = leaders["left"]["port"]
+            with self.assertRaisesRegex(ValueError, "distinct"):
+                teleop.load_bindings(None, None, "both")
+
+    def test_manual_disable_stops_all_seven_without_changing_parameters(self):
+        virtual = MeasuredMotors()
+        virtual.modes = dict.fromkeys(range(1, 8), 2)
+        for motor in range(1, 8):
+            virtual.params[(motor, mit.MODE)] = 1
+        parameters = dict(virtual.params)
+        arms = {"right": {"models": ["rs-06"] * 3 + ["rs-00"] * 4, "motor_uids": virtual.uids}}
+        with patch.object(mit, "check_channel"), patch.object(mit.can, "Bus", return_value=virtual), \
+                patch.object(rebot_disable, "load_config", return_value=arms), \
+                patch.object(rebot_disable, "resolve_channel", return_value="can0"), redirect_stdout(io.StringIO()):
+            self.assertTrue(rebot_disable.disable(side="right"))
+        self.assertEqual(set(virtual.modes.values()), {0})
+        self.assertEqual(virtual.params, parameters)
+        self.assertEqual({(m.arbitration_id >> 24) & 31 for m in virtual.sent}, {0, 4})
 
 
 class SevenMotorTransportTests(unittest.TestCase):
+    def test_mit_feedback_positions_are_fresh_and_do_not_query_parameters(self):
+        virtual = MeasuredMotors()
+        with patch.object(mit, "check_channel"), patch.object(mit.can, "Bus", return_value=virtual):
+            with mit.MotorBus("can0", ["rs-06"] * 3 + ["rs-00"] * 4, motor_count=7) as bus:
+                with self.assertRaises(TimeoutError):
+                    bus.feedback_positions(.08)
+                for motor in range(1, 8):
+                    position = .1 * motor
+                    code = int((position + 4 * math.pi) / (8 * math.pi) * 65535)
+                    bus.inspect(reply(2, motor, struct.pack(">HHHH", code, 32767, 32767, 250), mode=2))
+                np.testing.assert_allclose(bus.feedback_positions(.08), np.arange(1, 8) * .1, atol=.0004)
+                self.assertFalse(virtual.sent)
+                bus.feedback[7]["received_at"] -= .2
+                with self.assertRaisesRegex(TimeoutError, "7.*stale"):
+                    bus.feedback_positions(.08)
+
     def test_gripper_encoding_is_explicit_and_range_checked(self):
         with self.assertRaises(ValueError):
             mit.encode_mit(7, "rs-00", 0, 0)

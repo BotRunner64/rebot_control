@@ -180,16 +180,18 @@ class Reader:
         return found
 
     def positions(self):
+        return [self.position(motor_id) for motor_id in MOTOR_IDS]
+
+    def position(self, motor_id):
+        if motor_id not in MOTOR_IDS:
+            raise ValueError("Expected a motor ID between 1 and 7.")
         parameter = ParameterType.MECHANICAL_POSITION[0]
-        values = []
-        for motor_id in MOTOR_IDS:
-            data = self.query(CommunicationType.READ_PARAMETER, motor_id,
-                              struct.pack("<HHI", parameter, 0, 0), parameter)
-            value, = struct.unpack_from("<f", data, 4)
-            if not math.isfinite(value):
-                raise ValueError(f"Motor {motor_id}: invalid position feedback.")
-            values.append(value)
-        return values
+        data = self.query(CommunicationType.READ_PARAMETER, motor_id,
+                          struct.pack("<HHI", parameter, 0, 0), parameter)
+        value, = struct.unpack_from("<f", data, 4)
+        if not math.isfinite(value):
+            raise ValueError(f"Motor {motor_id}: invalid position feedback.")
+        return value
 
 
 @contextmanager
@@ -255,19 +257,40 @@ def bound_arm(side, config):
     return arms[side]
 
 
-def calibrate(side, replace=False, config=CONFIG):
+def capture_gripper(reader):
+    samples = []
+    for _ in range(10):
+        samples.append(reader.position(7))
+        time.sleep(.02)
+    if max(samples) - min(samples) > math.radians(2):
+        raise ValueError("The gripper moved during capture. Keep it fully closed and retry.")
+    return statistics.median(samples)
+
+
+def calibrate(side, replace=False, config=CONFIG, gripper_only=False):
     arm = bound_arm(side, config)
+    if gripper_only and "reference_rad" not in arm:
+        raise ValueError("Calibrate the complete arm before updating only the gripper reference.")
     if "reference_rad" in arm and not replace:
         raise ValueError("A calibration already exists; use --replace to recalibrate.")
     with open_reader(resolve_channel(arm)) as reader:
         verify_identity(reader, arm)
-        reference = capture_pose(reader)
+        if gripper_only:
+            reference = list(arm["reference_rad"])
+            reference[6] = capture_gripper(reader)
+        else:
+            reference = capture_pose(reader)
     latest = load_config(config)
     if latest.get(side) != arm:
         raise ValueError("The binding changed during calibration; reference was not saved.")
     latest[side]["reference_rad"] = reference
     save_config(latest, config)
-    print(f"Saved seven software reference angles (rad) for {side}: {reference}")
+    if gripper_only:
+        print(f"Saved {side} gripper closed reference: "
+              f"{math.degrees(arm['reference_rad'][6]):+.2f} -> {math.degrees(reference[6]):+.2f} deg "
+              f"({reference[6]:+.9f} rad). J1-J6 software references are unchanged.")
+    else:
+        print(f"Saved seven software reference angles (rad) for {side}: {reference}")
 
 
 def read(side, watch=False, config=CONFIG):
@@ -326,6 +349,8 @@ def main():
     calibration = commands.add_parser("calibrate", help="Capture the software reference pose immediately")
     calibration.add_argument("side", choices=("left", "right"))
     calibration.add_argument("--replace", action="store_true")
+    calibration.add_argument("--gripper-only", action="store_true",
+                             help="Record only the fully closed gripper reference, preserving J1-J6")
     reading = commands.add_parser("read", help="Read raw and relative motor angles")
     reading.add_argument("side", choices=("left", "right"))
     reading.add_argument("--watch", action="store_true")
@@ -334,7 +359,7 @@ def main():
         if args.command == "bind":
             bind(args.side, args.channel, args.replace, args.config)
         elif args.command == "calibrate":
-            calibrate(args.side, args.replace, args.config)
+            calibrate(args.side, args.replace, args.config, gripper_only=args.gripper_only)
         elif args.command == "read":
             read(args.side, args.watch, args.config)
         else:

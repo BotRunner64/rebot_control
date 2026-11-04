@@ -199,6 +199,44 @@ class SetupTests(unittest.TestCase):
                 rebot.calibrate("left", config=self.config)
         self.assertEqual(self.config.read_bytes(), original)
 
+    def test_gripper_only_calibration_preserves_six_axes_and_binding(self):
+        self.bind()
+        arm = rebot.load_config(self.config)["left"]
+        arm["reference_rad"] = [.1, .2, .3, .4, .5, .6, math.radians(.42)]
+        rebot.save_config({"left": arm}, self.config)
+        self.reader.position.return_value = math.radians(-10.17)
+        self.reader.positions.reset_mock()
+        with patch.object(rebot, "resolve_channel", return_value="can0"):
+            rebot.calibrate("left", replace=True, config=self.config, gripper_only=True)
+        updated = rebot.load_config(self.config)["left"]
+        expected = dict(arm, reference_rad=arm["reference_rad"][:6] + [math.radians(-10.17)])
+        self.assertEqual(updated, expected)
+        self.assertEqual(self.reader.position.call_count, 10)
+        self.assertTrue(all(call.args == (7,) for call in self.reader.position.call_args_list))
+        self.reader.positions.assert_not_called()
+
+    def test_gripper_only_requires_existing_references_and_explicit_replace(self):
+        self.bind()
+        with self.assertRaisesRegex(ValueError, "complete arm"):
+            rebot.calibrate("left", config=self.config, gripper_only=True)
+        arm = rebot.load_config(self.config)["left"]
+        arm["reference_rad"] = [0.] * 7
+        rebot.save_config({"left": arm}, self.config)
+        with self.assertRaisesRegex(ValueError, "--replace"):
+            rebot.calibrate("left", config=self.config, gripper_only=True)
+
+    def test_moving_gripper_does_not_overwrite_existing_references(self):
+        self.bind()
+        arm = rebot.load_config(self.config)["left"]
+        arm["reference_rad"] = [0.] * 7
+        rebot.save_config({"left": arm}, self.config)
+        original = self.config.read_bytes()
+        self.reader.position.side_effect = [i * .02 for i in range(10)]
+        with patch.object(rebot, "resolve_channel", return_value="can0"):
+            with self.assertRaisesRegex(ValueError, "gripper moved"):
+                rebot.calibrate("left", replace=True, config=self.config, gripper_only=True)
+        self.assertEqual(self.config.read_bytes(), original)
+
     def test_usb_path_resolves_after_can_interface_renumbering(self):
         self.bind()
         arm = rebot.load_config(self.config)["left"]
