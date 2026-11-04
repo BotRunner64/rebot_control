@@ -49,7 +49,7 @@ python rebot.py read right --watch
 
 这些命令只发送设备 ID 查询和位置参数 `0x7019` 读取，不发送使能、卸力、运动、模式切换、硬件零位或参数写入；退出仅关闭 CAN socket。它们不释放已有锁力，也不提供重力补偿。缺失反馈、UID 不匹配、无效角度或收到故障报告时停止当前操作；不会用零值补齐。双臂按实物核对后分别执行，不要求同时连接。
 
-此软件参考标定与官方示例向电机发送的零位设置不同。尚未完成出厂/硬件零位设置的机械臂，需要按 [RS 快速入门](https://wiki.seeedstudio.com/cn/rebot_b601_rs_getting_started/) 完成对应步骤；本脚本的本地偏置不能替代该步骤。参考角也不会自动应用到现有 `stararm_teleop.py`：该脚本的 Rebot 目标仍由 StarArm 控制 MuJoCo 模型，不控制实体 RS。
+此软件参考标定与官方示例向电机发送的零位设置不同。尚未完成出厂/硬件零位设置的机械臂，需要按 [RS 快速入门](https://wiki.seeedstudio.com/cn/rebot_b601_rs_getting_started/) 完成对应步骤；本脚本的本地偏置不能替代该步骤。`stararm_teleop.py` 的 Rebot 目标仍只控制 MuJoCo 模型；实体遥操使用下文的 `rebot_teleop.py`。
 
 ### 实体 reBot 双臂姿态同步到 MuJoCo
 
@@ -74,6 +74,62 @@ python rebot_mirror.py --config /path/to/rebot.local.yaml
 ```
 
 默认请求 30 Hz，每次顺序读取左、右臂各七路角度，不保证硬件同步；实际刷新率取决于 CAN 反馈速度。仅在两臂反馈均完整时更新姿态，任一侧读取失败则冻结两只模型并报告失败侧，短暂缺帧会重试；连续失败至少三次且距上次完整反馈已超过两秒时退出。收到电机故障报告则立即退出，不等待重试。
+
+### Star Arm 遥操实体 reBot
+
+`rebot_teleop.py` 将 Star Arm 的七路串口角度映射为实体 RS 的原生 MIT 位置、速度和 PD 指令；遥操不启用重力补偿，前馈力矩设为零，不打开 MuJoCo 窗口。默认控制左右双臂及两只夹爪，也支持只连接单侧。运行即使能选中的电机，无需使能开关。
+
+先按前文完成所选两种机械臂的 `bind` 和 `calibrate`；默认分别读取 `stararm.local.yaml` 和 `rebot.local.yaml`。两者标定姿态应对应同一模型零姿态，两只手柄及实体夹爪均以闭合位置为参考。CAN 未就绪时先运行 `python rebot.py scan`。停止其他真机控制程序，将主从臂摆到接近的对应姿态并留出运动空间；程序释放 Star Arm 锁力，启动前需托稳主臂。
+
+```bash
+conda activate rebot_control
+python rebot_teleop.py --side right                  # 右侧主臂控制右侧真机和夹爪
+python rebot_teleop.py --side left                   # 左侧
+python rebot_teleop.py                               # 双臂和夹爪；默认
+python rebot_teleop.py --side right --no-gripper     # 仅控制 J1–J6，不改变夹爪控制状态
+```
+
+电机需事先处于 MIT 模式；脚本不自动失能或切换运行模式。若提示模式不符，先退出遥操，将机械臂放到支撑上，再显式运行下面的独立手动命令（这条命令会失能）：
+
+```bash
+python rebot_disable.py --side right --prepare-mit --gripper
+# 双臂改为 --side both；--gripper 将第七路也纳入手动失能及模式设置。
+```
+
+开始运动前核验所有选中从臂的七个电机 UID、主臂完整反馈、软件参考角、独立串口和 CAN 通道、当前位置及所选电机模式。一侧启动检查失败时不会使能另一侧。支持继续采用上次运行留下的电机侧位置保持。
+
+六轴目标为 `radians(Star Arm 多圈角度 − reference_deg) × [+1,+1,−1,−1,−1,+1]`，不折回 ±180°，再裁剪到官方 RS 遥操限位和 MIT 原始角度编码范围的交集；发送时加回从臂 `reference_rad`。目标裁剪和实测姿态校验均采用这套遥操限位，不再使用动力学 URDF 的关节范围，因此 J3 可到 200°。主臂越过限位后从臂保持在该端，反向回到范围内时继续跟随。
+
+当前位置限位与 [官方 LeRobot RS follower 配置](https://github.com/Seeed-Projects/lerobot-robot-seeed-b601/blob/main/lerobot_robot_seeed_b601/config_seeed_b601_rs_follower.py#L64) 一致，单位为度，相对于从臂软件标定零位；最终还受 MIT 原始角度编码范围约束。
+
+| 关节 | 官方 RS 遥操限位 |
+| --- | --- |
+| J1 | −145～145 |
+| J2 | 0～170 |
+| J3 | 0～200 |
+| J4 | −80～90 |
+| J5 | −90～90 |
+| J6 | −130～130 |
+| 夹爪电机 | 0～270 |
+
+手柄目标为参考角差的 `×6`，默认裁剪到夹爪电机相对闭合位置的 `0..270°`。尚未在实物上验证角度与行程的关系，可用 `--gripper-open-deg` 缩小范围（不能超过官方的 270° 上限），或用 `--no-gripper` 保留原有夹爪状态。即使关闭夹爪控制，身份检查仍要求七个绑定电机在线。
+
+启动时先保持真机当前位置，并以 `0.03 rad` 容差检查初始姿态。进入遥操后，每帧将主臂映射并裁剪后的目标位置直接发送给电机，不做目标速度限制、插值或限速接入；主从初始姿态不同时，第一帧就会发送对应的主臂目标。MIT 目标速度统一设为零，作为阻尼环的速度参考，不代表实际运动速度为零。程序不提供 `--speed`、`--gripper-speed` 参数，也没有加速度、jerk 限制或环境、自碰撞及桌面避障。
+
+MIT 的 `v_des` 是期望关节角速度，单位为 rad/s。电机侧控制律为 `tau = Kp * (q_des - q) + Kd * (v_des - v) + tau_ff`；当前 `v_des=0` 且 `tau_ff=0`，因此为 `tau = Kp * (q_des - q) - Kd * v`。位置误差项仍会驱动电机追向不断更新的 `q_des`，速度项则提供与实际运动方向相反的阻尼。`v_des=0` 不会把实际速度限制为零，也没有设置最大运动速度。
+
+```bash
+python rebot_teleop.py --side right --gripper-open-deg 180
+python rebot_teleop.py --config /path/to/rebot.local.yaml --leader-config /path/to/stararm.local.yaml
+```
+
+原生六轴增益保留 `kp=[50,150,150,50,50,50]`、`kd=[3,10,10,5,4,4]`，复用归位/采样的 `MOTION_KP/MOTION_KD`；夹爪保持 `kp=50, kd=4`。启动、跟随和退出位置保持均使用零前馈力矩，由电机侧 PD 提供位置跟随及保持力矩。遥操不加载动力学模型或重力辨识配置，不提供 `--calibration` 参数。时序和温度阈值仍从 `rebot_hand_guiding.yaml` 读取，可用 `--settings` 更换；其中 `gravity_scale` 和 `torque_limit_nm` 不参与遥操控制，**不限制电机侧 PD 总输出或夹持力**。
+
+默认请求 50 Hz，实际频率由串口与 CAN 时延决定，退出打印实际成对指令频率。每帧先取得全部主臂角度，再读取和验证全部从臂，最后发送；每个从臂先发送整批六/七轴指令，再统一等待反馈。任一主臂缺帧、整组读取过慢（默认超过 0.08 秒）、从臂反馈过期、控制间隔超过 0.10 秒、电机反馈缺失、超温或故障都会结束两侧遥操并尝试位置保持，不沿用旧的主臂目标重试。双臂依次发送，不保证硬件同步；一侧发送中失败时，另一侧已发出的该帧无法撤回。
+
+空格、Esc、Q、Ctrl-C 或处理到的 SIGTERM/SIGHUP 结束遥操并尝试对已经启用的电机安装零目标速度的位置保持，退出不自动失能。沿用现有控制约定，将选中电机 CAN 看门狗设为零并回读确认，退出不恢复旧值、不写 EEPROM；主臂保持自由卸力。CAN 故障、断电或 SIGKILL 不能保证保持成功，清理结果以终端逐电机确认/错误为准。需要手动释放从臂时，先提供支撑，再运行 `python rebot_disable.py --side right --gripper`（双臂用 `--side both`）。
+
+验证状态：新增离线测试覆盖连续多圈映射、官方七轴上下限裁剪、J3 超过旧模型 180° 范围的反馈正常接受、J6 初始姿态超出官方范围时拒绝使能、夹爪范围不得超过 270°、首帧和后续大幅目标直接发送、零 MIT 目标速度、初始夹爪姿态检查、单臂不控制夹爪、双臂缺帧和过期停止、控制间隔超时、夹爪反馈丢失、启动 UID/模式检查、部分使能失败、信号停止、退出保持，以及显式手动夹爪失能/模式设置。另校验全部遥操路径不计算重力，启动、跟随及退出 CAN 帧使用零前馈力矩，保留既有 MIT 增益。串口和 CAN 均使用模拟对象，未在本次实现中驱动实物，尚需实机验证方向、夹爪范围与实际控制频率。
 
 ### 手动引导与位置保持（Hand Guiding）
 
