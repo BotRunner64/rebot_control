@@ -1,258 +1,154 @@
-"""Regression tests for independent latest-frame camera capture."""
+"""Capture selection and cleanup checks using the real GStreamer type system."""
 
 import contextlib
 import io
-import queue
 import sys
-import threading
-import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import MagicMock, patch
 
-from webcam_viewer import CameraReader, CameraWindow, configure_capture, display, parse_args
+from webcam_viewer import CameraPreview, choose_format, discover_cameras, display, parse_args
+
+try:
+    import gi
+    gi.require_version("Gst", "1.0")
+    from gi.repository import Gst
+    Gst.init(None)
+except (ImportError, ValueError):
+    Gst = None
 
 
-class CaptureError(Exception):
-    pass
+@unittest.skipIf(Gst is None, "Run with /usr/bin/python3 for GStreamer bindings")
+class FormatSelectionTests(unittest.TestCase):
+    def select(self, description):
+        selected = choose_format(Gst.Caps.from_string(description))
+        self.assertTrue(selected.is_fixed())
+        info = selected.get_structure(0)
+        return (info.get_int("width")[1], info.get_int("height")[1],
+                info.get_fraction("framerate")[1:])
+
+    def test_largest_usable_mode_wins_over_higher_frame_rate(self):
+        self.assertEqual(self.select(
+            "image/jpeg,width=1280,height=720,framerate=60/1;"
+            "image/jpeg,width=2592,height=1944,framerate=23/1;"
+            "image/jpeg,width=3840,height=2160,framerate=10/1"
+        ), (2592, 1944, (23, 1)))
+
+    def test_highest_resolution_is_fallback_when_no_mode_meets_thresholds(self):
+        self.assertEqual(self.select(
+            "image/jpeg,width=320,height=240,framerate=60/1;"
+            "image/jpeg,width=1600,height=1200,framerate=10/1"
+        ), (1600, 1200, (10, 1)))
+
+    def test_thresholds_are_inclusive(self):
+        self.assertEqual(self.select(
+            "image/jpeg,width=320,height=240,framerate=60/1;"
+            "image/jpeg,width=640,height=480,framerate=15/1"
+        ), (640, 480, (15, 1)))
+
+    def test_same_resolution_uses_highest_frame_rate(self):
+        self.assertEqual(self.select(
+            "image/jpeg,width=1280,height=720,framerate=15/1;"
+            "image/jpeg,width=1280,height=720,framerate=30/1"
+        ), (1280, 720, (30, 1)))
+
+    def test_lists_and_ranges_are_supported(self):
+        self.assertEqual(self.select(
+            "video/x-raw,format=YUY2,width=[320,1280],height=[240,720],framerate=[15/1,30/1]"
+        ), (1280, 720, (30, 1)))
+        self.assertEqual(self.select(
+            "image/jpeg,width=1280,height=720,framerate={15/1,30/1}"
+        ), (1280, 720, (30, 1)))
+
+    def test_empty_or_unsupported_caps_report_error(self):
+        for description in ("EMPTY", "video/x-h264,width=1920,height=1080,framerate=30/1"):
+            with self.subTest(description=description), self.assertRaisesRegex(RuntimeError, "no supported"):
+                choose_format(Gst.Caps.from_string(description))
 
 
-class ControlledCapture:
-    def __init__(self):
-        self.frames = queue.Queue()
-        self.reading = threading.Event()
-        self.released = threading.Event()
-        self.release_thread = None
+class ArgumentTests(unittest.TestCase):
+    def test_defaults_defer_to_device_discovery(self):
+        with patch.object(sys, "argv", ["webcam_viewer.py"]):
+            self.assertEqual(vars(parse_args()), {"cameras": None})
 
-    def isOpened(self):
-        return True
-
-    def read(self):
-        self.reading.set()
-        item = self.frames.get(timeout=5)
-        if isinstance(item, Exception):
-            raise item
-        return item is not None, item
-
-    def release(self):
-        self.release_thread = threading.current_thread()
-        self.released.set()
+    def test_indices_are_normalized_and_duplicate_paths_are_rejected(self):
+        with patch.object(sys, "argv", ["webcam_viewer.py", "--cameras", "0", "/dev/video2"]):
+            self.assertEqual(parse_args().cameras, ["/dev/video0", "/dev/video2"])
+        with patch.object(sys, "argv", ["webcam_viewer.py", "--cameras", "0", "/dev/video0"]), \
+                contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            parse_args()
 
 
-class CameraReaderTests(unittest.TestCase):
-    def make_reader(self, source):
-        capture = ControlledCapture()
-        reader = CameraReader(source, capture, SimpleNamespace(error=CaptureError))
-        reader.start()
-        self.addCleanup(self.close_reader, reader, capture)
-        self.assertTrue(capture.reading.wait(1))
-        return reader, capture
+class LifecycleTests(unittest.TestCase):
+    def test_discovery_releases_monitor_and_deduplicates_devices(self):
+        gst = MagicMock()
+        monitor = gst.DeviceMonitor.new.return_value
+        properties = [SimpleNamespace(get_string=lambda key, path=path, field=field:
+                                      path if key == field else None)
+                      for path, field in (("/dev/video2", "device.path"),
+                                          ("/dev/video0", "api.v4l2.path"),
+                                          ("/dev/video2", "api.v4l2.path"),
+                                          ("/dev/media0", "device.path"))]
+        monitor.get_devices.return_value = [SimpleNamespace(get_properties=lambda props=props: props)
+                                            for props in properties]
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(discover_cameras(gst), ["/dev/video0", "/dev/video2"])
+        monitor.stop.assert_called_once()
 
-    @staticmethod
-    def close_reader(reader, capture):
-        reader.stop()
-        capture.frames.put(None)
-        reader.close()
-
-    def wait_for(self, predicate):
-        deadline = time.monotonic() + 2
-        while not predicate():
-            if time.monotonic() >= deadline:
-                self.fail("Timed out waiting for capture state")
-            threading.Event().wait(0.001)
-
-    def test_blocked_camera_does_not_block_latest_frame_updates(self):
-        slow, slow_capture = self.make_reader("slow")
-        fast, fast_capture = self.make_reader("fast")
-        for value in range(1, 101):
-            fast_capture.frames.put(SimpleNamespace(size=1, value=value))
-
-        self.wait_for(lambda: fast.snapshot()[0] is not None
-                      and fast.snapshot()[0].value == 100)
-        frame, received_at, _ = fast.snapshot()
-        self.assertEqual(frame.value, 100)
-        self.assertGreater(received_at, 0)
-        self.assertIsNone(slow.snapshot()[0])
-        self.assertFalse(slow_capture.released.is_set())
-
-    def test_failed_read_clears_old_frame_and_recovers(self):
-        reader, capture = self.make_reader("recovering")
-        capture.frames.put(SimpleNamespace(size=1, value=1))
-        self.wait_for(lambda: reader.snapshot()[0] is not None)
-        with contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(io.StringIO()):
-            capture.frames.put(None)
-            self.wait_for(lambda: reader.snapshot()[0] is None)
-            capture.frames.put(SimpleNamespace(size=1, value=2))
-            self.wait_for(lambda: reader.snapshot()[0] is not None)
-        self.assertEqual(reader.snapshot()[0].value, 2)
-
-    def test_capture_error_releases_device_on_reader_thread(self):
-        reader, capture = self.make_reader("broken")
+    def test_partial_setup_failure_still_releases_pipeline(self):
+        runtime = MagicMock()
+        preview = CameraPreview("/dev/video0", runtime, MagicMock())
+        preview.pipeline = MagicMock()
         with contextlib.redirect_stderr(io.StringIO()):
-            capture.frames.put(CaptureError("Disconnected"))
-            self.assertTrue(capture.released.wait(1))
-        self.assertIsNone(reader.snapshot()[0])
-        self.assertIs(capture.release_thread, reader.thread)
+            preview.fail("setup failed")
+        preview.close()
+        self.assertTrue(preview.failed)
+        preview.pipeline.set_state.assert_called_with(runtime.Gst.State.NULL)
 
-
-class CaptureSettingsTests(unittest.TestCase):
-    def setUp(self):
-        self.cv2 = SimpleNamespace(CAP_PROP_FRAME_WIDTH=3, CAP_PROP_FRAME_HEIGHT=4,
-                                   CAP_PROP_FPS=5, CAP_PROP_FOURCC=6, CAP_PROP_BUFFERSIZE=38)
-        self.values = {3: 640, 4: 480, 5: 60, 6: 1196444237, 38: 4}
-        self.changes = []
-        self.capture = SimpleNamespace(get=self.values.get, set=self.set_property)
-        self.args = SimpleNamespace(width=None, height=None, fps=None,
-                                    fourcc=None, buffer_size=None)
-
-    def set_property(self, prop, value):
-        self.changes.append((prop, value))
-        self.values[prop] = value
-        return True
-
-    def test_defaults_do_not_renegotiate_native_stream(self):
-        configure_capture(self.capture, self.args, self.cv2, "test")
-        self.assertEqual(self.changes, [])
-        self.assertEqual(self.values[5], 60)
-        self.assertEqual(self.values[38], 4)
-
-    def test_linux_cli_defaults_use_verified_capture_mode(self):
-        with patch("webcam_viewer.sys.platform", "linux"), \
-                patch("webcam_viewer.sys.argv", ["webcam_viewer.py"]), \
-                patch("webcam_viewer.discover_cameras", return_value=["/dev/video5", "/dev/video7"]):
-            args = parse_args()
-        self.assertEqual((args.width, args.height, args.fps, args.backend),
-                         (1920, 1080, 30, "v4l2"))
-        self.assertIsNone(args.buffer_size)
-        self.assertIsNone(args.fourcc)
-
-    def test_buffer_changes_only_when_explicitly_requested(self):
-        self.args.buffer_size = 2
-        configure_capture(self.capture, self.args, self.cv2, "test")
-        self.assertEqual(self.changes, [(38, 2)])
-
-    def test_frame_size_sets_both_dimensions_even_if_height_is_unchanged(self):
-        self.args.width, self.args.height = 1280, 480
-        pending = {}
-
-        def set_paired_size(prop, value):
-            self.changes.append((prop, value))
-            pending[prop] = value
-            if 3 in pending and 4 in pending:
-                self.values.update(pending)
-            return True
-
-        self.capture.set = set_paired_size
-        output = io.StringIO()
-        with contextlib.redirect_stderr(output):
-            configure_capture(self.capture, self.args, self.cv2, "test")
-        self.assertEqual(self.changes, [(3, 1280), (4, 480)])
-        self.assertEqual(self.values[3], 1280)
-        self.assertEqual(output.getvalue(), "")
-
-    def test_reports_frame_rate_request_ignored_by_device(self):
-        self.args.fps = 30
-        self.capture.set = lambda prop, value: True
-        output = io.StringIO()
-        with contextlib.redirect_stderr(output):
-            configure_capture(self.capture, self.args, self.cv2, "test")
-        self.assertIn("requested FPS 30, got 60", output.getvalue())
-
-class CameraWindowTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        try:
-            import numpy as np
-            from PIL import Image, ImageOps
-        except ImportError as exc:
-            raise unittest.SkipTest("Window rendering tests need NumPy and Pillow") from exc
-        cls.np, cls.image, cls.image_ops = np, Image, ImageOps
-
-    def setUp(self):
-        self.tk = MagicMock()
-        self.canvas = self.tk.Canvas.return_value
-        self.canvas.winfo_width.return_value = 640
-        self.canvas.winfo_height.return_value = 480
-        self.image_tk = MagicMock()
-        self.reader = MagicMock(source="test")
-        frame = self.np.zeros((1080, 1920, 3), dtype=self.np.uint8)
-        frame[:, :, 2] = 255
-        self.reader.snapshot.return_value = (frame, 99.5, 30)
-        self.window = CameraWindow(MagicMock(), self.reader, 0, self.tk,
-                                   self.image, self.image_tk, self.image_ops)
-        clock = patch("webcam_viewer.time.monotonic", return_value=100)
-        clock.start()
-        self.addCleanup(clock.stop)
-
-    def test_bgr_frame_is_red_and_keeps_aspect_ratio(self):
-        self.window.update()
-        image = self.image_tk.PhotoImage.call_args.args[0]
-        self.assertEqual(image.size, (640, 360))
-        self.assertEqual(image.getpixel((320, 180)), (255, 0, 0))
-        self.canvas.coords.assert_called_with(self.window.picture, 320, 240)
-        self.assertIs(self.window.photo, self.image_tk.PhotoImage.return_value)
-
-    def test_resize_redraws_latest_frame_without_waiting_for_capture(self):
-        self.window.update()
-        self.window.update()
-        self.assertEqual(self.image_tk.PhotoImage.call_count, 1)
-        self.canvas.winfo_width.return_value = 320
-        self.canvas.winfo_height.return_value = 400
-        self.window.update()
-        image = self.image_tk.PhotoImage.call_args.args[0]
-        self.assertEqual(image.size, (320, 180))
-        self.canvas.coords.assert_called_with(self.window.picture, 160, 200)
-
-    def test_stale_frame_clears_preview_and_fresh_frame_recovers(self):
-        self.window.update()
-        frame = self.reader.snapshot.return_value[0]
-        self.reader.snapshot.return_value = (frame, 98, 0)
-        self.window.update()
-        self.canvas.itemconfigure.assert_called_with(self.window.picture, image="")
-        self.assertIsNone(self.window.photo)
-        self.assertIn("no signal", self.window.status.configure.call_args.kwargs["text"])
-        self.reader.snapshot.return_value = (frame, 99.9, 30)
-        self.window.update()
-        self.assertIsNotNone(self.window.photo)
-        self.assertNotIn("no signal", self.window.status.configure.call_args.kwargs["text"])
-
-
-class DisplayLifecycleTests(unittest.TestCase):
-    def test_no_open_devices_releases_captures_and_destroys_tk(self):
-        tk, cv2 = MagicMock(), MagicMock()
-        cv2.VideoCapture.return_value.isOpened.return_value = False
-        args = SimpleNamespace(cameras=["0"], backend="auto")
+    def test_error_before_pipeline_creation_is_safe(self):
+        preview = CameraPreview("/dev/video0", MagicMock(), MagicMock())
         with contextlib.redirect_stderr(io.StringIO()):
-            result = display(args, cv2, tk, None, None, None)
-        self.assertEqual(result, 1)
-        cv2.VideoCapture.return_value.release.assert_called_once()
-        tk.Tk.return_value.destroy.assert_called_once()
+            preview.fail("missing plugin")
+        preview.close()
+        self.assertTrue(preview.failed)
 
-    def test_gui_callback_error_stops_readers_and_destroys_tk(self):
-        tk, cv2 = MagicMock(), MagicMock()
-        cv2.VideoCapture.return_value.get.return_value = 0
-        root = tk.Tk.return_value
-        args = SimpleNamespace(cameras=["0"], backend="auto")
+    def test_timeout_reports_failure(self):
+        preview = CameraPreview("/dev/video0", MagicMock(), MagicMock())
+        preview.pipeline = MagicMock()
+        preview.started_at = 1.0
+        with patch("webcam_viewer.time.monotonic", return_value=12), \
+                contextlib.redirect_stderr(io.StringIO()):
+            preview.check_timeout()
+        self.assertTrue(preview.failed)
 
-        def run_callback():
-            callback = root.after.call_args.args[1]
-            try:
-                callback()
-            except Exception:
-                root.report_callback_exception(*sys.exc_info())
+    def test_window_close_and_keyboard_events_quit_loop(self):
+        gst = MagicMock()
+        loop = MagicMock()
+        preview = CameraPreview("/dev/video0", SimpleNamespace(Gst=gst), loop)
+        message = SimpleNamespace(parse_error=lambda: (SimpleNamespace(message="Output window was closed"), None))
+        preview.on_error(None, message)
+        loop.quit.assert_called_once()
+        loop.reset_mock()
+        info = MagicMock()
+        info.get_event.return_value.type = gst.EventType.NAVIGATION
+        details = info.get_event.return_value.get_structure.return_value
+        for key in ("q", "Escape"):
+            details.get_string.side_effect = lambda field: "key-press" if field == "event" else key
+            preview.on_navigation(None, info)
+        self.assertEqual(loop.quit.call_count, 2)
 
-        root.mainloop.side_effect = run_callback
-        with patch("webcam_viewer.CameraReader") as reader_type, \
-                patch("webcam_viewer.configure_capture"), \
-                patch("webcam_viewer.CameraWindow") as window_type, \
+    def test_main_loop_error_releases_all_previews_and_signal_callbacks(self):
+        runtime = MagicMock()
+        runtime.GLib.MainLoop.return_value.run.side_effect = KeyboardInterrupt
+        with patch("webcam_viewer.CameraPreview") as preview_type, \
                 contextlib.redirect_stdout(io.StringIO()):
-            window_type.return_value.update.side_effect = RuntimeError("Render failed")
-            with self.assertRaisesRegex(RuntimeError, "Render failed"):
-                display(args, cv2, tk, None, None, None)
-        reader_type.return_value.stop.assert_called_once()
-        reader_type.return_value.close.assert_called_once()
-        root.quit.assert_called_once()
-        root.destroy.assert_called_once()
+            previews = [MagicMock(failed=False), MagicMock(failed=False)]
+            preview_type.side_effect = previews
+            with self.assertRaises(KeyboardInterrupt):
+                display(["/dev/video0", "/dev/video2"], runtime)
+        for preview in previews:
+            preview.close.assert_called_once()
+        self.assertEqual(runtime.GLib.source_remove.call_count, 2)
 
 
 if __name__ == "__main__":

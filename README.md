@@ -244,26 +244,25 @@ python rebot_identify.py --side right
 
 ### 多路 Webcam 预览
 
-安装依赖后运行 `webcam_viewer.py`，每个摄像头使用独立的 Tkinter 窗口显示。OpenCV 仅负责采集，Pillow 负责画面转换和缩放，不使用 OpenCV 窗口：
+运行 `webcam_viewer.py`，GStreamer 自动发现摄像头、查询支持的采集模式，并为每路设备打开独立预览窗口：
 
 ```bash
-python -m pip install opencv-python-headless numpy Pillow
-python webcam_viewer.py                                    # 自动识别设备，1920×1080 / 30 FPS
-python webcam_viewer.py --cameras 0 2 4                     # 自定义摄像头编号
+python webcam_viewer.py                                    # 自动识别设备并选择采集模式
+python webcam_viewer.py --cameras 0 2                       # 指定摄像头编号
 python webcam_viewer.py --cameras /dev/video0 /dev/video2
-python webcam_viewer.py --cameras 0 1 --width 1920 --height 1080 --fps 30
-python webcam_viewer.py --backend v4l2 --width 1920 --height 1080 --fps 30
 ```
 
-需要桌面图形环境和 Tkinter，可运行 `python -m tkinter` 检查。若缺少 Tkinter，Conda 环境安装 `conda install tk`；Ubuntu 系统 Python 安装 `sudo apt install python3-tk`。已有 `opencv-python` 的环境只需补装 `Pillow`，也能运行；新环境使用上面的 headless 版本，同一环境只保留一种 OpenCV 包。
+程序面向 Linux 桌面环境，使用系统 GStreamer 和 PyGObject；Ubuntu 可安装：
 
-画面保持宽高比，每路显示设备标识，窗口可独立移动和缩放；打开或读取失败的设备显示黑底及无信号提示，其余设备继续预览。按 `Q`、`Esc`、关闭任意摄像头窗口或 `Ctrl-C` 退出并释放所有摄像头。分辨率和帧率是请求值，实际采集参数取决于设备支持；多路画面不保证硬件同步。Linux 默认查询设备能力并跳过元数据节点；其他系统默认摄像头编号为 `0`、`1`。也可通过 `--cameras` 显式指定设备。
+```bash
+sudo apt install python3-gi gir1.2-gstreamer-1.0 gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-x
+```
 
-每路摄像头在独立线程中持续读取，只保留最新帧；显示窗口不会等待其他摄像头采集。默认使用已在本机两路摄像头同时验证的 1920×1080 / 30 FPS 模式，Linux 使用 V4L2，其他系统自动选择后端；保留后端缓冲大小和设备格式。用 `--backend auto|v4l2|ffmpeg` 选择后端；启动日志会打印实际后端。`--width` 和 `--height` 修改采集分辨率；预览区域初始约为 640×480，画面随窗口尺寸按比例缩放并居中。仅在需要时用 `--fps`、`--fourcc MJPG`、`--buffer-size` 请求修改；不支持的参数会报告实际返回值。启动日志中的设备参数不表示已经有画面，收到第一帧后会明确打印 `first frame received`。窗口文字使用 Tk 系统字体，不再需要 OpenCV Qt 字体目录修复。
+Conda 等 Python 环境若缺少系统 GStreamer 绑定，程序会自动切换到 `/usr/bin/python3` 执行；也可直接使用 `/usr/bin/python3 webcam_viewer.py`。预览不依赖 OpenCV、Pillow 或 Tkinter。
 
-本机 LRCP USB3.0（`0bda:3535`）公布的 MJPG 模式中，640×480 仅对应 60 FPS，1920×1080 对应 30 FPS。单路实测 V4L2 在 640×480/60 FPS 下，默认 4 帧缓冲和 1 帧缓冲均出现取帧超时；1920×1080/30 FPS、默认缓冲已通过双路同时取帧验证，因此作为默认配置。尚未确定 640×480 模式失败是摄像头固件、驱动还是 OpenCV 的具体兼容性问题。
+采集模式使用 Cheese 的自动选择规则：从设备公布的模式中，优先选宽度 ≥640 像素且帧率 ≥15 FPS 的最高分辨率；没有符合条件的模式时选择最高分辨率。同一分辨率优先选择最高帧率。程序不维护已保存的分辨率偏好，不提供手动设置分辨率、帧率、格式或缓冲大小的命令行参数，也不写死某个摄像头的采集分辨率。本机两路 LRCP USB3.0 自动选到 MJPEG 2592×1944 / 23 FPS，该模式已通过双路取帧验证，可保留完整鱼眼视野。
 
-窗口中的 FPS 是实际读取速率，`Last read` 是最近一次读取完成至今的时间，不代表从曝光到显示的总延迟；超过 1 秒没有新帧时显示无信号。`select() timeout` 表示设备没有及时返回帧，不能通过修改字体修复。先退出预览进程，分别用 `python webcam_viewer.py --cameras /dev/video5` 和对应另一设备的路径测试；如果单路默认设置也超时，重新插拔摄像头并重新识别节点。若仅双路失败，再检查共用 USB Hub、带宽及供电。设备读取异常阻塞时，退出最多等待每路线程 2 秒并报告仍阻塞的设备。
+GStreamer 负责采集、解码和显示；预览画面等比例缩小到约 640×480 后显示，窗口可调整大小，缩放不会改变采集视野。窗口标题和启动日志显示设备与选定模式，实际收到第一帧后打印 `first frame received`。按 `Q`、`Esc`、关闭任意预览窗口或按 `Ctrl-C` 退出并释放设备。某一路失败时报告错误，其他设备继续预览；启动后 10 秒仍无首帧时报告超时，所有设备失败时程序退出。多路画面不保证硬件同步。
 
 ### Star Arm 遥操作
 
