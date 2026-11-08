@@ -2,14 +2,7 @@
   <!--Kinematic mirror from Fashion Star 102-HD URDF, local reference revision 298fd045. J5 restored as a -Z hinge using the same-series FL/ROS model; hand rings driven oppositely. Verify against hardware.-->
   <compiler angle="radian" meshdir="meshes" inertiafromgeom="false" balanceinertia="true" />
   <option gravity="0 0 0" timestep="0.002" />
-  <statistic center="0 0 0.2" extent="0.6" />
-  <visual>
-    <global azimuth="135" elevation="-25" offwidth="1280" offheight="960" />
-    <headlight ambient="0.4 0.4 0.4" diffuse="0.7 0.7 0.7" />
-  </visual>
   <asset>
-    <texture name="grid" type="2d" builtin="checker" rgb1="0.22 0.25 0.29" rgb2="0.28 0.31 0.35" width="256" height="256" />
-    <material name="floor" texture="grid" texrepeat="8 8" reflectance="0.05" />
     <mesh name="base_link" file="base_link.STL" />
     <mesh name="link1" file="link1.STL" />
     <mesh name="link2" file="link2.STL" />
@@ -21,8 +14,6 @@
     <mesh name="link7_right" file="link7_right.STL" />
   </asset>
   <worldbody>
-    <light pos="0 -0.3 1.5" dir="0 0 -1" diffuse="0.7 0.7 0.7" />
-    <geom name="floor" type="plane" size="1 1 0.01" pos="0 0 -0.001" material="floor" contype="0" conaffinity="0" />
     <body name="base_link">
       <inertial pos="-0.0066489 -6.1244E-05 0.014595" mass="0.17532" fullinertia="0.00028106 0.00012868 0.00038729 -7.522E-10 -1.7559E-06 4.9741E-08" />
       <geom name="base_link_visual" type="mesh" mesh="base_link" rgba="0.83 0.85 0.88 1" contype="0" conaffinity="0" />
@@ -68,7 +59,4 @@
       </body>
     </body>
   </worldbody>
-  <keyframe>
-    <key name="reference" qpos="0 0 0 0 0 0 0 0" />
-  </keyframe>
 </mujoco>

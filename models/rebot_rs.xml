@@ -35,7 +35,6 @@
     <material name="rs_seeed_green_mat" rgba="0.725 0.835 0.118 1" specular="0.22" shininess="0.26" />
   </asset>
   <worldbody>
-    <light pos="0.4 -0.3 2.5" dir="0 0 -1" diffuse="0.7 0.7 0.7" />
     <body name="base_link" pos="0 0 0">
       <inertial pos="0.0000029 -0.0001223 0.0243376" mass="1.1774" fullinertia="0.0013304 0.00213119 0.00275877 0.00000001 0 0" />
       <geom pos="0 0 0" group="1" contype="0" conaffinity="0" material="rs_base_black_mat" type="mesh" mesh="base_link" />
@@ -107,8 +106,4 @@
     </body>
     <geom contype="0" conaffinity="0" name="work_table" type="box" pos="0.6 0 0.745" size="0.2975 0.65 0.005" rgba="0.97 0.97 0.97 1" />
   </worldbody>
-  <visual>
-    <global offwidth="1280" offheight="960" />
-    <headlight ambient="0.4 0.4 0.4" diffuse="0.6 0.6 0.6" />
-  </visual>
 </mujoco>

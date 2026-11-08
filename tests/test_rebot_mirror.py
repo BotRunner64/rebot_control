@@ -1,6 +1,6 @@
 """Verify physical RS pose mapping and paired read-only viewer lifecycle."""
 
-from contextlib import contextmanager, nullcontext, redirect_stderr, redirect_stdout
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 import io
 import math
 from pathlib import Path
@@ -102,7 +102,7 @@ class LifecycleTests(unittest.TestCase):
                 self.closed.append(side)
 
         @contextmanager
-        def open_viewer(*args):
+        def open_viewer(*args, **kwargs):
             try:
                 yield self.viewer
             finally:
@@ -110,7 +110,6 @@ class LifecycleTests(unittest.TestCase):
 
         self.viewer = MagicMock()
         self.viewer.is_running.side_effect = [True, True, False]
-        self.viewer.lock.side_effect = nullcontext
         self.viewer_closed = False
         self.pose_calls = []
 

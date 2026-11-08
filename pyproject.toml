@@ -14,9 +14,13 @@ dependencies = [
     "Pillow>=10.0",
     "mujoco>=3.3",
     "pin>=3.9.0",
+    "websockets>=14,<17",
     "pyserial>=3.5",
     "pyyaml>=6.0",
 ]
+
+[project.optional-dependencies]
+ee = ["mink>=1.4.0,<2", "quadprog>=0.1.13"]
 
 [tool.uv]
 package = false

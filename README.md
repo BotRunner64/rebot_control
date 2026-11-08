@@ -57,9 +57,11 @@ python rebot.py calibrate right --gripper-only --replace
 
 这些命令只发送设备 ID 查询和位置参数 `0x7019` 读取，不发送使能、卸力、运动、模式切换、硬件零位或参数写入；退出仅关闭 CAN socket。它们不释放已有锁力，也不提供重力补偿。缺失反馈、UID 不匹配、无效角度或收到故障报告时停止当前操作；不会用零值补齐。双臂按实物核对后分别执行，不要求同时连接。
 
-此软件参考标定与官方示例向电机发送的零位设置不同。尚未完成出厂/硬件零位设置的机械臂，需要按 [RS 快速入门](https://wiki.seeedstudio.com/cn/rebot_b601_rs_getting_started/) 完成对应步骤；本脚本的本地偏置不能替代该步骤。`stararm_teleop.py` 的 Rebot 目标仍只控制 MuJoCo 模型；实体遥操使用下文的 `rebot_teleop.py`。
+此软件参考标定与官方示例向电机发送的零位设置不同。尚未完成出厂/硬件零位设置的机械臂，需要按 [RS 快速入门](https://wiki.seeedstudio.com/cn/rebot_b601_rs_getting_started/) 完成对应步骤；本脚本的本地偏置不能替代该步骤。`stararm_teleop.py` 的 Rebot 目标只控制 Three.js 中的虚拟机械臂；实体遥操使用下文的 `rebot_teleop.py`。
 
-### 实体 reBot 双臂姿态同步到 MuJoCo
+### 实体 reBot 双臂姿态同步到 Three.js
+
+项目的 3D viewer 统一使用本地 Three.js，覆盖 Star Arm 预览、reBot 双臂镜像和末端控制。MuJoCo 保留为计算后端，不创建原生窗口；Mink 和 quadprog 保留用于末端 IK。Three.js 与控件已随项目打包，WebSocket 服务使用基础依赖 `websockets`。
 
 完成两臂的 `bind` 和 `calibrate` 后，运行新脚本：
 
@@ -68,9 +70,9 @@ conda activate rebot_control
 python rebot_mirror.py
 ```
 
-程序读取 `rebot.local.yaml`，按 USB 路径解析两块 CAN 适配器，核验两臂七个电机的 UID，再打开 MuJoCo 双臂场景。手动拖动实体 Rebot Arm 左右臂，仿真中的对应机械臂跟随显示。沿用现有 RS 模型、桌面和双臂布局。若 CAN 尚未启动，先运行 `python rebot.py scan`。
+程序读取 `rebot.local.yaml`，按 USB 路径解析两块 CAN 适配器，核验两臂七个电机的 UID，再打开本机 Three.js 双臂页面。手动拖动实体 Rebot Arm 左右臂，仿真中的对应机械臂跟随显示。沿用现有 RS 模型、桌面和双臂布局。若 CAN 尚未启动，先运行 `python rebot.py scan`。
 
-实体臂应先处于可手动拖动状态，并在拖动时托稳。此脚本只查询角度，启动、运行和退出均不发送使能、卸力、运动、模式切换或硬件零位指令，也不提供重力补偿。如果实物已锁力，脚本不会自动解除锁力。关闭 MuJoCo 窗口或 Ctrl-C 退出并关闭两路 CAN 连接，不改写本地标定。
+实体臂应先处于可手动拖动状态，并在拖动时托稳。此脚本只查询角度，启动、运行和退出均不发送使能、卸力、运动、模式切换或硬件零位指令，也不提供重力补偿。如果实物已锁力，脚本不会自动解除锁力。点击页面 `Stop viewer` 或在终端按 Ctrl-C 退出并关闭两路 CAN 连接，不改写本地标定。
 
 六轴按 `当前电机角度（弧度）− reference_rad` 直接赋给对应模型关节，不应用 StarArm 的方向映射或角度倍率，不折回 ±π。标定时的实体参考姿态需对应模型零姿态，否则显示会有偏差；超出模型关节范围时裁剪并在终端提示。这里只更新关节位置并计算运动学，不进行动力学积分。
 
@@ -79,13 +81,16 @@ python rebot_mirror.py
 ```bash
 python rebot_mirror.py --fps 30 --gripper-open-deg 270
 python rebot_mirror.py --config /path/to/rebot.local.yaml
+python rebot_mirror.py --no-browser --port 8080
 ```
+
+页面默认使用 `127.0.0.1:8080`，端口占用时自动向后选择；`--port` 指定起始端口，`--no-browser` 仅打印地址。关闭或刷新浏览器后允许重新连接，退出请点击 `Stop viewer` 或在终端按 Ctrl-C。
 
 默认请求 30 Hz，每次顺序读取左、右臂各七路角度，不保证硬件同步；实际刷新率取决于 CAN 反馈速度。仅在两臂反馈均完整时更新姿态，任一侧读取失败则冻结两只模型并报告失败侧，短暂缺帧会重试；连续失败至少三次且距上次完整反馈已超过两秒时退出。收到电机故障报告则立即退出，不等待重试。
 
 ### Star Arm 遥操实体 reBot
 
-`rebot_teleop.py` 将 Star Arm 的七路串口角度映射为实体 RS 的原生 MIT 位置、速度和 PD 指令；遥操不启用重力补偿，前馈力矩设为零，不打开 MuJoCo 窗口。默认控制左右双臂及两只夹爪，也支持只连接单侧。运行即使能选中的电机，无需使能开关。
+`rebot_teleop.py` 将 Star Arm 的七路串口角度映射为实体 RS 的原生 MIT 位置、速度和 PD 指令；遥操不启用重力补偿，前馈力矩设为零，不启动 viewer。默认控制左右双臂及两只夹爪，也支持只连接单侧。运行即使能选中的电机，无需使能开关。
 
 先按前文完成所选两种机械臂的 `bind` 和 `calibrate`；默认分别读取 `stararm.local.yaml` 和 `rebot.local.yaml`。两者标定姿态应对应同一模型零姿态，两只手柄及实体夹爪均以闭合位置为参考。CAN 未就绪时先运行 `python rebot.py scan`。停止其他真机控制程序，将主从臂摆到接近的对应姿态并留出运动空间；程序释放 Star Arm 锁力，启动前需托稳主臂。
 
@@ -147,9 +152,78 @@ python rebot_teleop.py --config /path/to/rebot.local.yaml --leader-config /path/
 
 离线验证实际启动 `spawn` 子进程，硬件由可跨进程创建的模拟串口/CAN 替代。覆盖硬件连接分属独立 PID、完整目标直接发送、既有 MIT 增益、零速度/零前馈、运行期间无额外机械位置查询、单臂不控制夹爪、跨进程 UID/模式启动屏障、部分使能失败、CAN 缺帧、采集阻塞后旧数据不能续鲜、CAN 进程突然退出时另一侧保持、主进程 SIGTERM、监控心跳中断，以及共享锁超时和过期周期跳过。另保留官方限位及归位模块内七轴失能的回归。本次未驱动实物，200/500 Hz 的实际时序、MIT 反馈位置、方向和夹爪范围仍需实机验证。
 
+### Mink 末端位姿控制（EE Pose）
+
+`rebot_ee.py` 是独立的单臂末端控制入口，支持 `--side right|left`。默认只运行运动学仿真，不读取绑定、不打开 CAN；加 `--hardware` 才连接并使能实体 J1–J6，夹爪保持原有状态。交互界面统一使用 Three.js Web viewer；MuJoCo 仅作为模型、正向运动学与碰撞计算后端，Mink 继续负责 IK。已移除原生 MuJoCo viewer，不使用 Viser。当前没有接入 Star Arm 主臂，也不同时控制双臂。
+
+控制链路为：**基座坐标系下的 TCP 目标 → Mink / quadprog 在一次调用中迭代求出关节解 → 加回 `reference_rad` → 现有 `MotorBus.command_position` 直接下发 → MIT 电机侧 PD**。IK 参数与 YAM 官方 `Kinematics.ik` 对齐：数值步长 0.01、最多 200 次迭代、位置/朝向误差阈值均为 `1e-4`、任务 `lm_damping=1`、QP `damping=1e-4`。这些迭代连续执行，数值步长不代表实际运动时间；求出的关节目标直接发送，不按控制周期插值，不添加关节速度、加速度或 jerk 限制。`--joint-speed` 和 `--max-tracking-error` 已移除。沿用遥操的六轴 `MOTION_KP/MOTION_KD`，`v_des=0`、`tau_ff=0`，不启用重力补偿。目标求解/显示循环请求 50 Hz，独立 CAN 线程请求 250 Hz；双方通过最新指令和反馈快照通信，错过周期跳过，不补发。
+
+```bash
+conda activate rebot_control
+python -m pip install 'mink>=1.4.0,<2' 'quadprog>=0.1.13' 'websockets>=14,<17'
+# 使用 uv 管理依赖时也可运行 uv sync --extra ee
+
+# 默认运动学仿真：自动打开本机 Web viewer，直接拖动三维操作柄
+python rebot_ee.py
+
+# 只输出浏览器地址
+python rebot_ee.py --no-browser --port 8080
+
+# 仿真：TCP 沿基座 X 正方向移动 1 cm，保持启动朝向，运行 2 秒
+python rebot_ee.py --headless --offset 0.01 0 0 --duration 2
+
+# 仿真：指定绝对位置与朝向；位置单位 m，角度单位 deg
+python rebot_ee.py --pose 0.30 0.07 0.65 0 -30 20
+
+# 实体右臂：从实测 TCP 沿基座 X 正方向移动 1 cm，然后退出并保持
+python rebot_ee.py --hardware --side right --headless --offset 0.01 0 0 --duration 2
+```
+
+Web viewer 默认绑定 `127.0.0.1:8080`，端口占用时向后选择可用端口，终端打印实际地址；可用 `--port` 指定起始端口。前端使用本地打包的 Three.js 0.180.0、标准 `TransformControls` 和 `OrbitControls`，不依赖 CDN、Node.js 或前端构建步骤。模型网格启动时加载一次，后续通过同端口 WebSocket 更新各连杆姿态；浏览器以自身帧率渲染并立即更新正在拖动的目标，约 50 Hz 向后端发布最新位姿。状态携带目标序号，避免旧的反馈把本地目标拉回。
+
+页面完成模型加载并连接后才打开 CAN。等待期间可在终端按 Ctrl-C 退出，不额外设置连接超时。`--no-browser` 禁止自动打开浏览器，可手动访问打印出的地址。默认禁止接收运动目标：核对模型后勾选 `Model matches the robot`，点击 `Enable control` 即进入 IK 控制。此按钮是目标接收开关，不是电机物理使能按钮；真机启动后已用 PD 保持当前位置。
+
+单个标准操作柄通过左上角按钮或快捷键切换，均不需要双击或按住 Ctrl：
+
+| 操作 | 方式 |
+| --- | --- |
+| 平移 | `Move` / `T`，拖轴箭头或平面方块 |
+| 旋转 | `Rotate` / `R`，拖圆环 |
+| 基座/工具坐标 | `World` / `Tool`，或 `Q` 切换；同时适用于平移与旋转 |
+| 对齐视图 | `Fit view` / `F` |
+| 精细步进 | 拖动时按住 Shift：平移 1 mm、旋转 1° |
+| 恢复本次拖动起点 | 拖动时按 Esc；不会结束控制 |
+| 调整相机 | 空白处左键旋转、右键平移、滚轮缩放 |
+
+拖操作柄时相机暂停响应，松开后恢复。快捷键在编辑输入框、下拉框或聚焦按钮时不处理。红/绿/蓝分别为 X/Y/Z。侧边栏位置单位 mm、固定轴 XYZ 欧拉角单位 deg，编辑后点 `Apply pose` 才提交；后端和前端使用一致的 `Rz(yaw) Ry(pitch) Rx(roll)` 约定。`Fine adjustment` 的六个按钮按 `Step` 沿所选 World/Tool 坐标微调。
+
+`Hold current position` 放弃旧目标，以实测当前位置重新建立目标；`STOP & hold` 结束程序并进入原有 MIT 保持清理。页面显示实际 TCP、目标、末端误差及碰撞拦截状态。`Joint sliders` 模式直接接收六轴角度目标；折叠的 `PD gains` 修改后点 `Apply gains` 生效，默认仍使用 reBot 增益，RS-00 的 KD 按协议上限为 5。切入 IK/关节模式时同步实测姿态；显式 `--pose` / `--offset` 会在首次进入 IK 模式后执行。
+
+无重力前馈，因此没有 YAM 的重力补偿可视化模式，默认改为 `VIZ (position hold)` 保持当前位置。也提供 `VIZ (no torque)`，实际下发零 KP、零 KD、零前馈，机械臂失去支撑力；运动学仿真不模拟该模式下的下落。浏览器断开后与 YAM 一样继续运行并保留最后指令，刷新/重连不会退出；结束请用 `STOP & hold` 或终端 Ctrl-C。Web 模式不读取终端的空格/Esc/Q，避免把终端焦点、鼠标或方向键的转义序列误判为退出；headless 模式保留原来的终端停止键。退出时打印 `EE stop reason`，区分页面按钮、终端键和 SIGINT/SIGTERM/SIGHUP；`TCP error` 是结束时的误差统计，不会因为目标不可达而自动退出。
+
+`--headless` 不启动 viewer，必须同时给出固定目标和 `--duration`。固定目标在期限结束时以末端误差不超过 2 mm、朝向误差不超过 2° 判定到达；到达返回 0，中止返回 130，未到达或出错返回 2。这是基于关节反馈和模型的判定，不是外部测量精度保证。
+
+`--pose x y z roll pitch yaw` 使用单臂底座坐标系，旋转为固定轴 XYZ 欧拉角（`R = Rz(yaw) Ry(pitch) Rx(roll)`），不是双臂场景的世界坐标。`--offset dx dy dz` 相对本次启动实测位置、沿基座轴平移并保持启动朝向。仿真初始关节角默认为 `[0,0,0,0,0,0]°`，对应模型参考零姿态，可用 `--start-joints` 改变；实体只接受实测启动姿态，不接受该参数，也不会自动运动到仿真零姿态。默认控制原 MJCF 的 `tcp`，位于 `gripper_end` 原点；如需以实际夹持中心为 TCP，可用 `--tcp-offset x y z` 指定其在 `gripper_end` 坐标系内的位置，朝向继承该坐标系，需按实物核对。
+
+IK 在内存中固定夹爪的三个显示用滑动关节，只求解 J1–J6；不修改原始 MJCF。关节范围使用前文官方遥操限位与 MIT 可编码范围的交集，含 J3 的 200° 上限。模型角度为 `原始电机角度 − reference_rad`，不再次应用 Star Arm 的方向映射。真机启动前预热求解器、核验七个 UID、检查六轴模式和姿态，随后沿用原生 MIT 使能及看门狗设置。每批指令使用 MIT 回复刷新反馈及备用保持姿态，不逐周期查询机械位置。
+
+EE 路径参考 [YAM Kinematics](https://github.com/i2rt-robotics/i2rt/blob/main/i2rt/robots/kinematics.py)。每次求解以最新实测关节角为初值；采用 Mink 默认的越界处理，不在 IK 入口或每次积分后增加严格角度拒绝，也不设置 `safety_break=True`。输入仍必须有限、形状正确。不可达目标在 200 次迭代后返回最后近似解，Three.js Web 和 headless 模式会继续使用。发送前按 reBot 关节/编码位置边界裁剪，不添加速度、跟踪误差或 IK 耗时停机阈值。
+
+独立 CAN 线程持续重发最后一条被接受的目标，并刷新实测关节角；IK 变慢或显示停顿不会使 CAN 等待求解。原有反馈时效、超温、故障及有限时间的 CAN 事务检查保留在通信层；IK 不再使用上一轮求解前的反馈时间作为发送期限，也不使用遥操的 `max_sample_gap_s` 限制目标循环。目标与 CAN 的实测频率分别在退出时打印。Web 回调只发布目标、模式或增益快照，不操作 CAN 和求解器。线程先停止并汇合，再由原有 `MotorBus` 安装退出保持；正常退出不失能、不归位、不恢复看门狗，不保证 SIGKILL、断电或通信故障时保持成功。
+
+目标自碰撞检查与 YAM 一样，使用独立 MuJoCo 数据检查将要发送的姿态，忽略平面和相邻刚性连杆，穿透深度超过 1 mm 时阻止更新指令并保留上一条已接受目标。内存模型开启现有网格的接触标志，固定夹爪零件按所属刚性连杆判断相邻关系，不修改源 MJCF。网格接触使用 MuJoCo 凸包近似，尚未用实物标定；没有整段路径、桌面或外部环境避障。运动学仿真只验证模型与目标求解，不模拟 PD 跟踪、负载或实物接触。
+
+保留的 reBot 适配包括 RS 原生扩展帧协议、模型/TCP、软件零位、关节及编码范围、默认 PD 增益、UID/模式核验、通信故障处理和退出位置保持；不复制 YAM 另一款电机的增益数值、CAN 事务时序或扩大的硬件关节边界。当前仍只控制六轴，不改变夹爪状态，未加入 YAM 的夹爪/示教手柄功能。重力与摩擦前馈均为零。
+
+离线测试使用真实 Mink 与虚拟 CAN，覆盖完整位姿直接发送、边界附近实测 IK 初值、目标自碰撞拦截及显示隔离、不可达目标、TCP 偏移、软件零位、MIT 增益、零速度/零前馈、UID/模式检查、缺失反馈、慢 IK 时 CAN 继续刷新、停止期间不发布新目标及退出保持。Web 协议测试另覆盖启用门控、模式/关节/增益到 MIT 编码的链路、零力矩模式、完整位姿与目标序号、错误消息隔离、静态资源和路径边界、断线后保持以及终端转义序列不误停；交互操作柄、数值输入、工具坐标微调和刷新恢复另在浏览器验证。运行：
+
+```bash
+python -m unittest discover -s tests -p 'test_rebot_ee*.py' -v
+```
+
 ### 手动引导与位置保持（Hand Guiding）
 
-`rebot_hand_guiding.py` 实现手动引导（Hand Guiding）：手动拖动时提供重力补偿与阻尼，静止后保持位置；当前不记录或回放轨迹。支持 `--side right|left|both`，默认仅选右臂。它与只读的 `rebot_mirror.py` 独立运行，本身不打开 MuJoCo 窗口。参考仓库的重力补偿及速度锁止示例提供了设计依据，但本脚本使用独立的通信和控制实现，不调用示例的自动归零流程。
+`rebot_hand_guiding.py` 实现手动引导（Hand Guiding）：手动拖动时提供重力补偿与阻尼，静止后保持位置；当前不记录或回放轨迹。支持 `--side right|left|both`，默认仅选右臂。它与只读的 `rebot_mirror.py` 独立运行，本身不启动 viewer。参考仓库的重力补偿及速度锁止示例提供了设计依据，但本脚本使用独立的通信和控制实现，不调用示例的自动归零流程。
 
 重力模型来自 `models/rebot_rs_dynamics.urdf`，保留参考仓库的惯性参数，由 Pinocchio 计算六轴 `g(q)`；夹爪移动分支固定在闭合位置，质量仍计入整臂。模型坐标为 `电机原始角度 − reference_rad`，正方向与姿态镜像一致。**使用前需核对实物参考姿态与模型零姿态、逐轴正方向；当前两臂零姿态已由用户确认一致，但动力学参数尚未在本机实物上辨识。** 假定底座水平、机械臂竖直安装、使用原配末端且未抓取负载；变更末端质量、安装方向或零位后需重新核对模型。
 
@@ -292,14 +366,15 @@ python stararm_teleop.py
 
 先将实物（包括手柄）摆到约定的默认零姿态并保持静止，再执行 `python stararm.py calibrate left`。命令立即采样并保存七个软件参考角到 `stararm.local.yaml`，不打开窗口、不等待 Enter、不逐轴检查方向，也不修改舵机硬件原点。右臂把 `left` 换为 `right`，重新标定加 `--replace`。
 
-独立脚本 `python stararm_teleop.py` 默认显示两只 Star Arm 的实时姿态；使用 `--target rebot` 切换为遥操 MuJoCo 中的两只 reBot Arm RS，不需要左右臂参数。程序自动读取已有绑定和软件标定，每臂读取七路角度；不连接实体 RS 或 CAN 总线。只更新模型关节位置，不进行动力学积分，当前用于姿态跟随预览。关闭窗口或 Ctrl-C 退出。
+独立脚本 `python stararm_teleop.py` 默认显示两只 Star Arm 的实时姿态；使用 `--target rebot` 切换为遥操 Three.js 中的两只虚拟 reBot Arm RS，不需要左右臂参数。程序自动读取已有绑定和软件标定，每臂读取七路角度；不连接实体 RS 或 CAN 总线。只更新模型关节位置，不进行动力学积分，当前用于姿态跟随预览。点击页面 `Stop viewer` 或在终端按 Ctrl-C 退出。
 
 `--target` 与 `--mode` 独立组合：
 
 ```bash
 python stararm_teleop.py --target stararm                 # Star Arm 双臂显示；默认
-python stararm_teleop.py --target rebot                   # 遥操 MuJoCo RS 双臂，布局参考 ABC-130K
+python stararm_teleop.py --target rebot                   # 遥操 Three.js 虚拟 RS 双臂，布局参考 ABC-130K
 python stararm_teleop.py --target rebot --mode hover      # 同上，启用实物 Star Arm 悬停
+python stararm_teleop.py --no-browser --port 8080         # 手动打开终端打印的本机地址
 ```
 
 `stararm` 显示沿用原来的 ROS/URDF 关节方向与手柄反向联动。`rebot` 的六轴采用 RS 参考 follower 的固定映射：直接用 SDK 多圈角度减去对应 Star Arm 的软件参考角，保留连续角度（不折回 ±180°），再依次乘以 `[+1, +1, -1, -1, -1, +1]`，转为弧度并裁剪到 RS 模型关节范围。手柄采用参考 follower 的 `×6` 电机角映射，再将 0–270° 线性换算为模型 0–50 mm 的单侧滑动行程；两侧夹爪同步张开。夹爪目前是可视化比例映射，尚未验证实体丝杆的角度—位移关系。
@@ -315,7 +390,7 @@ python stararm_teleop.py --mode observe  # 自由拖动，释放锁力，不自�
 python stararm_teleop.py --mode hover    # 自动悬停
 ```
 
-`observe` 和 `hover` 都在打开 MuJoCo 窗口前直接发送广播卸力指令，不等待 Enter；运行前需托住两只实物臂。`observe` 模式退出不会自动恢复锁力。
+`observe` 和 `hover` 都在打开 Three.js 页面前直接发送广播卸力指令，不等待 Enter；运行前需托住两只实物臂。`observe` 模式退出不会自动恢复锁力。
 
 双臂悬停规则：先托住两只实物臂，再执行：
 
@@ -327,12 +402,12 @@ python stararm_teleop.py --mode hover
 
 退出悬停：任意一个手柄张开，立即向两臂发送广播卸力指令，不需要手柄往返动作。以标定默认零姿态的手柄读数为闭合基准：偏离不超过 5° 判为闭合，偏离达到 10° 判为张开；中间区间保留前一状态，避免抖动反复切换。手柄 ID 6 始终不锁定。重新进入时仍需两臂同时静止且两手柄闭合。
 
-当前位置保持仍使用原版指令参数：100 ms、加减速各 50 ms、功率字段 4095。MuJoCo 使用实时角度，不增加静止检测滤波的延迟。此规则不再使用电流触发、电流基线或 `--hover-current-ma` 参数。
+当前位置保持仍使用原版指令参数：100 ms、加减速各 50 ms、功率字段 4095。Three.js 页面显示实时角度，不增加静止检测滤波的延迟。此规则不再使用电流触发、电流基线或 `--hover-current-ma` 参数。
 
 只有两臂反馈完整时才更新悬停逻辑；缺失反馈会清除静止计时并冻结模型，终端报告失败侧、缺失舵机 ID 和重试次数。短暂缺帧会重试，恢复完整反馈后继续运行；至少连续 3 次读取失败，且距上次完整反馈已超过 2 秒，才停止并执行退出卸力。SDK 单次缺帧读取本身可能耗时约 0.8 秒，不再因一次这样的超时直接退出。此版本未接入按钮板控制。
 
-这属于位置保持，不是连续重力补偿。`hover` 模式关闭窗口、Ctrl-C 或报错退出时，会在关闭串口前分别发送广播卸力指令；一侧卸力失败仍会尝试另一侧，并在终端报告失败。退出前需托住两只实物臂；物理断线时无法保证卸力指令送达。不重设舵机原点或多圈计数，不修改标定。
+这属于位置保持，不是连续重力补偿。`hover` 模式点击 `Stop viewer`、终端 Ctrl-C 或报错退出时，会在关闭串口前分别发送广播卸力指令；一侧卸力失败仍会尝试另一侧，并在终端报告失败。退出前需托住两只实物臂；物理断线时无法保证卸力指令送达。不重设舵机原点或多圈计数，不修改标定。
 
 模型保存在 `models/stararm.xml` 和 `models/meshes/`，来自 [Star Arm 102-HD 官方 URDF](https://github.com/servodevelop/Star-Arm-102/tree/298fd045d20c1b0419fa9521e90f8f99cb2b1b14/hardware/102-hd/urdf/stararm102-ld-hd-description)。原模型把 J5 导出成固定关节，本项目按同系列 FL/ROS 模型恢复为局部 -Z 转轴。此模型用于运动姿态回放，未作为 HD 动力学模型验证。
 
-RS 模型保存在 `models/rebot_rs.xml` 和 `models/rebot_rs_meshes/`，由参考仓库 `reBot-DevArm/Rebot_Arm_description/RS/mjcf/rs_arm.xml` 整理，仅保留机械臂可视网格与原始关节变换，去除相机、碰撞网格、驱动和动力学约束；夹爪的三个滑动关节由脚本同步赋值。模型和网格均位于当前仓库，运行不依赖参考仓库路径。
+RS 模型保存在 `models/rebot_rs.xml` 和 `models/rebot_rs_meshes/`，由参考仓库 `reBot-DevArm/Rebot_Arm_description/RS/mjcf/rs_arm.xml` 整理，保留机械臂网格、原始关节变换和腕部相机外参元数据；原生窗口的灯光、显示配置及独立碰撞网格、驱动和动力学约束已去除；夹爪的三个滑动关节由脚本同步赋值。模型和网格均位于当前仓库，运行不依赖参考仓库路径。

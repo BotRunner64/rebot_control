@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-"""Display Star Arms or teleoperate MuJoCo reBot RS arms from two Star Arm leaders."""
+"""Display Star Arms or teleoperate virtual reBot RS arms in Three.js."""
 import argparse
 from collections import deque
-from contextlib import contextmanager, ExitStack
+from contextlib import ExitStack
 from copy import deepcopy
 import math
 from pathlib import Path
 import struct
 import sys
-import threading
 import time
 import xml.etree.ElementTree as ET
 
@@ -100,9 +99,6 @@ def load_model(target="stararm"):
             if "name" in element.attrib:
                 element.set("name", f"{side}_{element.get('name')}")
         world.append(body)
-    reference = root.find("keyframe/key[@name='reference']")
-    if reference is not None:
-        reference.set("qpos", " ".join(["0"] * 16))
     model = mujoco.MjModel.from_xml_string(ET.tostring(root, encoding="unicode"))
     return model, mujoco.MjData(model)
 
@@ -129,30 +125,10 @@ def set_model_pose(model, data, degrees, target="stararm"):
     mujoco.mj_forward(model, data)
 
 
-def configure_view(viewer, target="stararm"):
-    with viewer.lock():
-        viewer.cam.lookat[:] = [.4, 0, 1.0] if target == "rebot" else [0, 0, .15]
-        viewer.cam.distance = 1.7 if target == "rebot" else 1.2
-        viewer.cam.azimuth = 180 if target == "rebot" else 160
-        viewer.cam.elevation = -25
-    viewer.sync()
+def open_viewer(model, data, target="stararm", *, port=8080, open_browser=True):
+    from rebot_viewer import SceneViewer
 
-
-@contextmanager
-def open_viewer(model, data, target="stararm"):
-    import mujoco.viewer
-
-    before = set(threading.enumerate())
-    viewer = mujoco.viewer.launch_passive(model, data, show_left_ui=False, show_right_ui=False)
-    threads = set(threading.enumerate()) - before
-    try:
-        configure_view(viewer, target)
-        yield viewer
-    finally:
-        viewer.close()
-        # Wait for rendering to finish before Python's GLFW teardown.
-        for thread in threads:
-            thread.join()
+    return SceneViewer(model, data, target, port=port, open_browser=open_browser)
 
 
 def release_torque(bus):
@@ -171,7 +147,10 @@ def release_on_exit(side, bus):
         print(f"{side}: exit unlock command sent.", flush=True)
 
 
-def teleop(mode="observe", config=CONFIG, target="stararm"):
+def teleop(mode="observe", config=CONFIG, target="stararm", *, port=8080, open_browser=True):
+    from rebot_viewer import validate_port
+
+    validate_port(port)
     if mode not in ("observe", "hover"):
         raise ValueError(f"Unknown teleoperation mode: {mode}")
     if target not in MODELS:
@@ -209,14 +188,14 @@ def teleop(mode="observe", config=CONFIG, target="stararm"):
         angles = {side: [angle - reference for angle, reference in zip(raw[side], references[side])]
                   for side in SIDES}
         set_model_pose(model, data, angles, target)
-        with open_viewer(model, data, target) as viewer:
+        with open_viewer(model, data, target, port=port, open_browser=open_browser) as viewer:
             hovering = HoverState(references) if mode == "hover" else None
             if mode == "hover":
                 print("Hover enabled: both arms still and both handles closed -> hold both arms. "
                       "Open either handle -> release both arms. Exit unlocks both arms.", flush=True)
             label = "reBot RS" if target == "rebot" else "Star Arm"
-            print(f"Star Arm -> MuJoCo {label} dual-arm teleoperation started. "
-                  "Move both leaders; close the viewer or Ctrl-C to stop.", flush=True)
+            print(f"Star Arm -> Three.js {label} dual-arm teleoperation started. "
+                  "Move both leaders; use Stop viewer or Ctrl-C to stop.", flush=True)
             started, frames, failures = time.monotonic(), 0, 0
             last_valid = started
             while viewer.is_running():
@@ -248,9 +227,7 @@ def teleop(mode="observe", config=CONFIG, target="stararm"):
                         hovering.update(buses, raw)
                     angles = {side: [angle - reference for angle, reference in zip(raw[side], references[side])]
                               for side in SIDES}
-                    with viewer.lock():
-                        set_model_pose(model, data, angles, target)
-                        data.time = time.monotonic() - started
+                    set_model_pose(model, data, angles, target)
                     frames += 1
                 viewer.sync()
                 time.sleep(max(0, 1 / 30 - (time.monotonic() - tick)))
@@ -263,9 +240,11 @@ def main():
                         help="stararm: display leader poses (default); rebot: teleoperate simulated RS arms")
     parser.add_argument("--mode", choices=("observe", "hover"), default="observe",
                         help="observe: release torque for manual movement (default); hover: paired stillness and handle-controlled pose holding")
+    parser.add_argument("--port", type=int, default=8080, help="Local Three.js viewer port")
+    parser.add_argument("--no-browser", action="store_true", help="Print the viewer URL without opening a browser")
     args = parser.parse_args()
     try:
-        teleop(mode=args.mode, target=args.target)
+        teleop(mode=args.mode, target=args.target, port=args.port, open_browser=not args.no_browser)
         return 0
     except (OSError, ValueError, RuntimeError, EOFError, ImportError, yaml.YAMLError, serial.SerialException) as exc:
         print(str(exc), file=sys.stderr)
