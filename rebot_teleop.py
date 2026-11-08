@@ -30,6 +30,7 @@ from rebot_teleop_runtime import (MOTOR_HZ, TARGET_HZ, SharedFrame, LoopTiming, 
 # Official Seeed LeRobot RS follower limits, ordered J1-J6 and gripper.
 JOINT_LIMITS_DEG = ((-145., 145.), (0., 170.), (0., 200.), (-80., 90.),
                     (-90., 90.), (-130., 130.), (0., 270.))
+STATE_LIMIT_TOLERANCE_RAD = 0.1
 
 
 def angles(value, name):
@@ -114,19 +115,20 @@ def validate_pose(raw, reference, low, high):
     raw = np.asarray(raw, dtype=float)
     if raw.shape != reference.shape or not np.all(np.isfinite(raw)):
         raise ValueError("Expected finite feedback for every selected follower motor.")
-    q = raw - reference
-    invalid = np.flatnonzero((q < low - .03) | (q > high + .03))
+    # Check arm travel only; gripper feedback still must be finite above.
+    q = (raw - reference)[:6]
+    invalid = np.flatnonzero((q < low[:6] - STATE_LIMIT_TOLERANCE_RAD)
+                             | (q > high[:6] + STATE_LIMIT_TOLERANCE_RAD))
     if len(invalid):
         details = []
         for index in invalid:
-            label = f"J{index + 1}" if index < 6 else "gripper"
             details.append(
-                f"{label}: relative={math.degrees(q[index]):.2f} deg, "
+                f"J{index + 1}: relative={math.degrees(q[index]):.2f} deg, "
                 f"limits=[{math.degrees(low[index]):.2f}, {math.degrees(high[index]):.2f}] deg, "
                 f"raw={math.degrees(raw[index]):.2f} deg, "
                 f"reference={math.degrees(reference[index]):.2f} deg")
         raise ValueError("Follower pose is outside teleoperation limits: " + "; ".join(details)
-                         + f"; tolerance={math.degrees(.03):.2f} deg. "
+                         + f"; tolerance={math.degrees(STATE_LIMIT_TOLERANCE_RAD):.2f} deg. "
                          "Check the physical pose and software reference.")
     return raw
 

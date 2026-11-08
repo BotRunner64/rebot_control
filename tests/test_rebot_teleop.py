@@ -79,6 +79,38 @@ class SharedFrameTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, r"J6: relative=140\.00 deg, limits=\[-130\.00, 130\.00\] deg"):
             teleop.validate_pose(q, reference, low, high)
 
+    def test_arm_feedback_accepts_logged_pose_and_checks_wider_margin_on_both_bounds(self):
+        arm = {"reference_rad": [.2] * 7, "models": ["rs-06"] * 3 + ["rs-00"] * 4}
+        for count in (6, 7):
+            reference, low, high = teleop.position_bounds(arm, count, 270)
+            q = reference.copy()
+            q[3] += math.radians(-81.73)
+            np.testing.assert_array_equal(teleop.validate_pose(q, reference, low, high), q)
+            for joint in range(6):
+                for bound, direction in ((low[joint], -1), (high[joint], 1)):
+                    with self.subTest(count=count, joint=joint, direction=direction):
+                        q = reference.copy()
+                        q[joint] += bound + direction * .099
+                        teleop.validate_pose(q, reference, low, high)
+                        q[joint] = reference[joint] + bound + direction * .101
+                        with self.assertRaisesRegex(ValueError, rf"J{joint + 1}:.*tolerance=5\.73 deg"):
+                            teleop.validate_pose(q, reference, low, high)
+
+    def test_gripper_feedback_ignores_travel_limits_but_requires_finite_complete_feedback(self):
+        arm = {"reference_rad": [.2] * 7, "models": ["rs-06"] * 3 + ["rs-00"] * 4}
+        reference, low, high = teleop.position_bounds(arm, 7, 180)
+        for relative in (-20., 200., 280.):
+            with self.subTest(relative=relative):
+                q = reference.copy()
+                q[6] += math.radians(relative)
+                np.testing.assert_array_equal(teleop.validate_pose(q, reference, low, high), q)
+        for invalid in (math.nan, math.inf, -math.inf):
+            q[6] = invalid
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(ValueError, "finite feedback"):
+                teleop.validate_pose(q, reference, low, high)
+        with self.assertRaisesRegex(ValueError, "finite feedback"):
+            teleop.validate_pose(reference[:6], reference, low, high)
+
     def test_timing_skips_missed_ticks_instead_of_bursting_commands(self):
         stop = MagicMock()
         with patch("rebot_teleop_runtime.time.monotonic", return_value=1.):
