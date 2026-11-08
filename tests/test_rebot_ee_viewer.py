@@ -82,9 +82,7 @@ class ViewerTests(unittest.TestCase):
         self.viewer.receive({"type": action, **values}, "browser-1")
 
     def enable_ik(self):
-        self.send("align", value=True)
-        self.send("enable")
-        self.send("mode", mode="IK control")
+        self.send("enable", aligned=True)
 
     def pose(self, target, seq=1):
         self.send("pose", **pose_packet(target), seq=seq)
@@ -121,7 +119,7 @@ class ViewerTests(unittest.TestCase):
             with self.subTest(message=message), self.assertRaises(ValueError):
                 self.viewer.receive(message, "browser-1")
         np.testing.assert_allclose(self.viewer.read_target(), initial)
-        np.testing.assert_array_equal(self.viewer.control_state()[4], ee.MOTION_KD)
+        self.assertTrue(self.viewer.is_enabled())
 
     def test_hold_and_stop_are_distinct_and_report_the_stop_client(self):
         self.send("hold")
@@ -133,7 +131,7 @@ class ViewerTests(unittest.TestCase):
         self.assertFalse(self.viewer.is_running())
         self.assertIn("web STOP & hold button (client browser-1)", output.getvalue())
 
-    def test_read_only_gate_ignores_target_and_gains_update_atomically(self):
+    def test_read_only_gate_holds_position_and_rejects_removed_settings(self):
         target = self.ik.pose()
         target[0, 3] += .05
         self.viewer.set_target(target)
@@ -142,15 +140,15 @@ class ViewerTests(unittest.TestCase):
                               ee.load_settings(), duration=.025, viewer=self.viewer)
         self.assertFalse(result.reached)
         np.testing.assert_array_equal(self.ik.data.qpos, SIM_START)
-        self.send("gains", kp=[75.] * 6, kd=[3.] * 6)
-        np.testing.assert_array_equal(self.viewer.control_state()[3], [75.] * 6)
-        np.testing.assert_array_equal(self.viewer.control_state()[4], [3.] * 6)
+        for action in ("gains", "joints", "mode", "align"):
+            with self.subTest(action=action), self.assertRaises(ValueError):
+                self.send(action)
+        self.assertFalse(self.viewer.is_enabled())
 
-    def test_joint_mode_gains_and_zero_torque_reach_real_mit_encoder(self):
+    def test_simple_enable_and_pose_keep_native_mit_gains(self):
         hardware = hardware_tests.HardwareTests()
         hardware.setUp()
-        goal = hardware_tests.TEST_START + np.radians([1., 1., -1., 1., 1., 1.])
-        kp, kd = ee.MOTION_KP * .8, ee.MOTION_KD * .8
+        target_offset = np.array([.003, 0., 0.])
 
         def connected_viewer(ik, stop, **kwargs):
             viewer = WebViewer(ik, stop, open_browser=False, server_factory=MemoryServer)
@@ -163,26 +161,22 @@ class ViewerTests(unittest.TestCase):
                 sync()
                 calls += 1
                 if calls == 2:
-                    for message in ({"type": "align", "value": True}, {"type": "enable"},
-                                    {"type": "mode", "mode": "Joint sliders"}):
-                        viewer.receive(message, "test")
+                    viewer.receive({"type": "enable", "aligned": True}, "test")
                 elif calls == 3:
-                    viewer.receive({"type": "joints", "values": np.degrees(goal).tolist()}, "test")
-                    viewer.receive({"type": "gains", "kp": kp.tolist(), "kd": kd.tolist()}, "test")
-                elif calls == 5:
-                    viewer.receive({"type": "mode", "mode": "VIZ (no torque)"}, "test")
+                    target = ik.pose(ik.data.qpos)
+                    target[:3, 3] += target_offset
+                    viewer.receive({"type": "pose", **pose_packet(target), "seq": 1}, "test")
             viewer.sync = advance
             return viewer
 
         with patch("rebot_ee_viewer.WebViewer", side_effect=connected_viewer):
-            hardware.run_control(headless=False, duration=.2)
-        moved = [command for command in hardware.commands if np.allclose(command[3], kp)]
-        self.assertTrue(moved)
-        np.testing.assert_allclose(moved[0][0], hardware.reference + goal, atol=.0004)
-        np.testing.assert_array_equal(moved[0][4], kd)
-        self.assertTrue(any(np.all(command[3] == 0) and np.all(command[4] == 0)
+            hardware.run_control(headless=False, offset=None, duration=.2)
+        self.assertTrue(any(np.max(np.abs(command[0] - hardware.commands[0][0])) > .002
                             for command in hardware.commands))
-        self.assertTrue(all(np.all(command[2] == 0) for command in hardware.commands))
+        for command in hardware.commands:
+            np.testing.assert_array_equal(command[3], ee.MOTION_KP)
+            np.testing.assert_array_equal(command[4], ee.MOTION_KD)
+            np.testing.assert_array_equal(command[2], np.zeros(6))
         hardware.assert_closed_and_holding()
 
     def test_disconnect_and_bad_packets_do_not_stop_or_enable_the_controller(self):
@@ -212,7 +206,7 @@ class ViewerTests(unittest.TestCase):
         self.assertIsNone(server._http(None, SimpleNamespace(path="/ws")))
         packet = json.loads(self.viewer.model_json)
         self.assertTrue(packet["meshes"])
-        self.assertEqual(packet["max_kd"][3:], [5., 5., 5.])
+        self.assertEqual(set(packet), {"meshes", "hardware"})
 
     def test_web_mode_ignores_terminal_focus_mouse_and_arrow_reports(self):
         master, slave = pty.openpty()
@@ -284,6 +278,29 @@ class ViewerTests(unittest.TestCase):
             viewer = WebViewer(ik, stop, open_browser=False, server_factory=MemoryServer)
             viewer.receive({"type": "ready"}, "test")
             viewer.receive({"type": "hold"}, "test")
+            return viewer
+
+        with patch("rebot_ee_viewer.WebViewer", side_effect=connected_viewer):
+            result = hardware.run_control(headless=False, offset=[.1, 0., 0.])
+        self.assertTrue(result.reached)
+        for command in hardware.commands:
+            np.testing.assert_allclose(command[0], hardware.reference + hardware_tests.TEST_START, atol=.0004)
+        hardware.assert_closed_and_holding()
+
+    def test_hold_discards_pending_startup_goal_before_control_is_started(self):
+        hardware = hardware_tests.HardwareTests()
+        hardware.setUp()
+
+        def connected_viewer(ik, stop, **kwargs):
+            viewer = WebViewer(ik, stop, open_browser=False, server_factory=MemoryServer)
+            viewer.receive({"type": "ready"}, "test")
+            viewer.receive({"type": "hold"}, "test")
+            sync = viewer.sync
+
+            def advance():
+                sync()
+                viewer.receive({"type": "enable", "aligned": True}, "test")
+            viewer.sync = advance
             return viewer
 
         with patch("rebot_ee_viewer.WebViewer", side_effect=connected_viewer):

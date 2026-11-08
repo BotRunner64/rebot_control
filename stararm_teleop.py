@@ -195,7 +195,7 @@ def teleop(mode="observe", config=CONFIG, target="stararm", *, port=8080, open_b
                       "Open either handle -> release both arms. Exit unlocks both arms.", flush=True)
             label = "reBot RS" if target == "rebot" else "Star Arm"
             print(f"Star Arm -> Three.js {label} dual-arm teleoperation started. "
-                  "Move both leaders; use Stop viewer or Ctrl-C to stop.", flush=True)
+                  "Move both leaders; use Close viewer or Ctrl-C to stop.", flush=True)
             started, frames, failures = time.monotonic(), 0, 0
             last_valid = started
             while viewer.is_running():

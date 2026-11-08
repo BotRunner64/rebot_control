@@ -65,7 +65,7 @@ def track(ik, target, stop, keys, cfg, *, duration=None, viewer=None, bus=None,
     timing = LoopTiming("ee-target", 50)
     started = time.monotonic()
     actual = ik.q
-    regime = None
+    previously_enabled = None
     hold_q = actual.copy()
     pending_goal = target.copy() if initial_goal else None
     motor = MotorWorker(bus, reference, ik.lower, ik.upper, cfg, stop) if bus is not None else None
@@ -84,48 +84,35 @@ def track(ik, target, stop, keys, cfg, *, duration=None, viewer=None, bus=None,
                     break
                 if motor is not None:
                     actual = motor.read()
-                enabled, mode, joints, kp, kd = True, "IK control", actual, MOTION_KP, MOTION_KD
-                if viewer is not None:
-                    enabled, mode, joints, kp, kd = viewer.control_state()
-                current_regime = mode if enabled else "VIZ (position hold)"
-                if current_regime != regime:
+                enabled = viewer is None or viewer.is_enabled()
+                if enabled != previously_enabled:
                     hold_q = actual.copy()
-                    if viewer is not None:
-                        viewer.sync_joints(actual)
-                        joints = actual.copy()
-                    if regime is not None and current_regime == "IK control":
+                    if previously_enabled is False and enabled:
                         target = ik.pose(actual) if pending_goal is None else pending_goal
                         pending_goal = None
                         viewer.set_target(target)
-                    regime = current_regime
+                    previously_enabled = enabled
                 if viewer is not None:
                     if viewer.consume_hold():
                         target = ik.pose(actual)
                         viewer.set_target(target)
                         hold_q = actual.copy()
-                    elif current_regime == "IK control":
+                        pending_goal = None
+                    elif enabled:
                         target = viewer.read_target()
                 blocked = False
-                if current_regime == "IK control":
+                if enabled:
                     next_q = ik.solve(target, init_q=actual, stop=stop)
                     next_q = np.clip(next_q, ik.lower, ik.upper)
                     blocked = ik.has_self_collision(next_q)
-                elif current_regime == "Joint sliders":
-                    next_q = np.clip(joints, ik.lower, ik.upper)
-                    blocked = ik.has_self_collision(next_q)
                 else:
                     next_q = hold_q
-                    kp, kd = MOTION_KP, MOTION_KD
-                    if current_regime == "VIZ (no torque)":
-                        kp, kd = np.zeros(6), np.zeros(6)
-                    if viewer is not None:
-                        viewer.sync_joints(actual)
                 if stop.is_set():
                     break
                 if motor is not None:
                     motor.check()
                     if not blocked:
-                        motor.command(next_q, kp, kd)
+                        motor.command(next_q)
                     actual = motor.read()
                 elif not blocked:
                     actual = next_q.copy()
@@ -231,7 +218,7 @@ def control(*, hardware=False, side="right", config=CONFIG, settings_path=SETTIN
                       "Hardware exit attempts position hold and leaves motors enabled; gripper is unchanged.",
                       flush=True)
                 if viewer is not None:
-                    print("Confirm alignment and enable control. T: translate; R: rotate; Q: world/tool; "
+                    print("Start control to drag the target. T: move; R: rotate; "
                           "F: fit view; Esc: cancel drag. Browser reconnect preserves control.", flush=True)
                 return track(ik, target, stop, keys, cfg, duration=duration, viewer=viewer, bus=bus,
                              reference=reference,

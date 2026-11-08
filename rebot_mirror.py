@@ -93,7 +93,7 @@ def mirror(config=CONFIG, fps=30.0, gripper_open_rad=GRIPPER_OPEN_RAD, *, port=8
         with open_viewer(model, data, "rebot", port=port, open_browser=open_browser) as viewer:
             print("Physical reBot RS -> Three.js dual-arm mirroring started. "
                   "Read-only: motor torque state is unchanged. "
-                  "Move the physical arms; use Stop viewer or press Ctrl-C to stop.", flush=True)
+                  "Move the physical arms; use Close viewer or press Ctrl-C to stop.", flush=True)
             started, frames, failures = time.monotonic(), 0, 0
             last_valid = started
             while viewer.is_running():

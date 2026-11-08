@@ -28,7 +28,6 @@ class MotorWorker:
         self.raw = validate_pose(bus.feedback_positions(cfg["max_feedback_age_s"]),
                                  reference, lower, upper).copy()
         self.target = self.raw.copy()
-        self.kp, self.kd = MOTION_KP.copy(), MOTION_KD.copy()
         self.error = None
         self.done = threading.Event()
         self.thread = threading.Thread(target=self._run, name="ee-can")
@@ -42,13 +41,11 @@ class MotorWorker:
         if self.error is not None:
             raise self.error
 
-    def command(self, q, kp, kd):
+    def command(self, q):
         q = np.clip(vector6(q, "Joint command"), self.lower, self.upper)
-        kp, kd = vector6(kp, "KP"), vector6(kd, "KD")
         self.check()
         with self.lock:
             self.target = self.reference + q
-            self.kp, self.kd = kp, kd
 
     def _run(self):
         timing = LoopTiming("ee-can", 250)
@@ -57,13 +54,11 @@ class MotorWorker:
             while not self.stop.is_set() and not self.done.is_set():
                 began = timing.tick()
                 with self.lock:
-                    target, kp, kd = self.target.copy(), self.kp.copy(), self.kd.copy()
-                self.bus.command_position(target, zero, zero, kp, kd,
+                    target = self.target.copy()
+                self.bus.command_position(target, zero, zero, MOTION_KP, MOTION_KD,
                                           began + self.cfg["max_feedback_age_s"])
                 raw = validate_pose(self.bus.feedback_positions(self.cfg["max_feedback_age_s"]),
                                     self.reference, self.lower, self.upper)
-                # Cleanup always holds with the established reBot position gains,
-                # even when the selected UI mode has zero PD gains.
                 self.bus.set_hold(raw, zero, MOTION_KP, MOTION_KD)
                 with self.lock:
                     self.raw = raw.copy()
