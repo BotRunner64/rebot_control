@@ -18,11 +18,29 @@ def request_stop(stop, reason):
         stop.set()
 
 
+class GravityFeedforward:
+    """Compute bounded gravity support from raw feedback and software references."""
+
+    def __init__(self, model, reference, cfg):
+        self.model = model
+        self.reference = vector6(reference, "Software reference")
+        self.scale = vector6(cfg["gravity_scale"], "Gravity scale")
+        self.limit = vector6(cfg["torque_limit_nm"], "Gravity torque limits")
+
+    def __call__(self, raw):
+        q = vector6(raw, "Motor feedback") - self.reference
+        gravity = vector6(self.model.gravity(q) * self.scale, "Gravity feedforward")
+        if np.any(np.abs(gravity) > self.limit):
+            raise RuntimeError("Required gravity torque exceeds configured EE feedforward limits.")
+        return gravity
+
+
 class MotorWorker:
     """Own CAN while running; IK and rendering only exchange copied snapshots."""
 
-    def __init__(self, bus, reference, lower, upper, cfg, stop):
+    def __init__(self, bus, reference, lower, upper, cfg, stop, gravity):
         self.bus, self.cfg, self.stop = bus, cfg, stop
+        self.gravity = gravity
         self.reference, self.lower, self.upper = reference, lower, upper
         self.lock = threading.Lock()
         self.raw = validate_pose(bus.feedback_positions(cfg["max_feedback_age_s"]),
@@ -55,11 +73,13 @@ class MotorWorker:
                 began = timing.tick()
                 with self.lock:
                     target = self.target.copy()
-                self.bus.command_position(target, zero, zero, MOTION_KP, MOTION_KD,
+                    measured = self.raw.copy()
+                gravity = self.gravity(measured)
+                self.bus.command_position(target, zero, gravity, MOTION_KP, MOTION_KD,
                                           began + self.cfg["max_feedback_age_s"])
                 raw = validate_pose(self.bus.feedback_positions(self.cfg["max_feedback_age_s"]),
                                     self.reference, self.lower, self.upper)
-                self.bus.set_hold(raw, zero, MOTION_KP, MOTION_KD)
+                self.bus.set_hold(raw, self.gravity(raw), MOTION_KP, MOTION_KD)
                 with self.lock:
                     self.raw = raw.copy()
                 timing.complete(began, time.monotonic())

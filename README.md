@@ -156,7 +156,9 @@ python rebot_teleop.py --config /path/to/rebot.local.yaml --leader-config /path/
 
 `rebot_ee.py` 是独立的单臂末端控制入口，支持 `--side right|left`。默认只运行运动学仿真，不读取绑定、不打开 CAN；加 `--hardware` 才连接并使能实体 J1–J6，夹爪保持原有状态。交互界面统一使用 Three.js Web viewer；MuJoCo 仅作为模型、正向运动学与碰撞计算后端，Mink 继续负责 IK。已移除原生 MuJoCo viewer，不使用 Viser。当前没有接入 Star Arm 主臂，也不同时控制双臂。
 
-控制链路为：**基座坐标系下的 TCP 目标 → Mink / quadprog 在一次调用中迭代求出关节解 → 加回 `reference_rad` → 现有 `MotorBus.command_position` 直接下发 → MIT 电机侧 PD**。IK 参数与 YAM 官方 `Kinematics.ik` 对齐：数值步长 0.01、最多 200 次迭代、位置/朝向误差阈值均为 `1e-4`、任务 `lm_damping=1`、QP `damping=1e-4`。这些迭代连续执行，数值步长不代表实际运动时间；求出的关节目标直接发送，不按控制周期插值，不添加关节速度、加速度或 jerk 限制。`--joint-speed` 和 `--max-tracking-error` 已移除。沿用遥操的六轴 `MOTION_KP/MOTION_KD`，`v_des=0`、`tau_ff=0`，不启用重力补偿。目标求解/显示循环请求 50 Hz，独立 CAN 线程请求 250 Hz；双方通过最新指令和反馈快照通信，错过周期跳过，不补发。
+控制链路为：**基座坐标系下的 TCP 目标 → Mink / quadprog 在一次调用中迭代求出关节解 → 加回 `reference_rad` → 现有 `MotorBus.command_position` 直接下发 → MIT 电机侧 PD**。IK 参数与 YAM 官方 `Kinematics.ik` 对齐：数值步长 0.01、最多 200 次迭代、位置/朝向误差阈值均为 `1e-4`、任务 `lm_damping=1`、QP `damping=1e-4`。这些迭代连续执行，数值步长不代表实际运动时间；求出的关节目标直接发送，不按控制周期插值，不添加关节速度、加速度或 jerk 限制。`--joint-speed` 和 `--max-tracking-error` 已移除。沿用遥操的六轴 `MOTION_KP/MOTION_KD`，`v_des=0`；硬件模式默认启用重力前馈，`tau_ff = g(q_measured) × gravity_scale`。目标求解/显示循环请求 50 Hz，独立 CAN 线程请求 250 Hz；双方通过最新指令和反馈快照通信，错过周期跳过，不补发。
+
+重力补偿使用现有 `GravityModel` / Pinocchio 和 `models/rebot_rs_dynamics.urdf`，输入为 `原始实测电机角度 − reference_rad`，不使用 IK 目标角度。启用前的保持、首批指令、CAN 循环、页面 `Hold` 和退出位置保持均携带补偿。`rebot_hand_guiding.yaml` 中的 `gravity_scale`（默认 `[1,0.98,0.98,1,1,1]`）和 `torque_limit_nm` 在 EE 中分别用于逐轴重力缩放及前馈检查；计算结果非有限或超限会报错并进入已有清理流程，不静默裁剪。该限值只约束重力前馈，**不限制电机侧 PD 总力矩**。使用原始 CAD 动力学模型，假定底座水平、机械臂竖直安装及原配空载末端，EE 当前不加载重力辨识配置；补偿可减小重力导致的稳态误差，模型偏差和摩擦仍可能留下残差。
 
 ```bash
 conda activate rebot_control
@@ -181,9 +183,9 @@ python rebot_ee.py --hardware --side right --headless --offset 0.01 0 0 --durati
 
 Web viewer 默认绑定 `127.0.0.1:8080`，端口占用时向后选择可用端口，终端打印实际地址；可用 `--port` 指定起始端口。前端使用本地打包的 Three.js 0.180.0、标准 `TransformControls` 和 `OrbitControls`，不依赖 CDN、Node.js 或前端构建步骤。模型网格启动时加载一次，后续通过同端口 WebSocket 更新各连杆姿态；浏览器以自身帧率渲染并立即更新正在拖动的目标，约 50 Hz 向后端发布最新位姿。状态携带目标序号，避免旧的反馈把本地目标拉回。
 
-页面完成模型加载并连接后才打开 CAN。等待期间可在终端按 Ctrl-C 退出；`--no-browser` 仅打印访问地址。页面默认保持当前位置，点击 `Start control` 开始接收末端目标；真机模式会先弹出一次模型确认。此按钮是目标接收开关，真机启动后已经使用 PD 保持当前位置。
+页面完成模型加载并连接后才打开 CAN。等待期间可在终端按 Ctrl-C 退出；`--no-browser` 仅打印访问地址。页面默认保持当前位置，点击 `Start control` 开始接收末端目标；真机模式会先弹出一次模型确认。此按钮是目标接收开关，真机启动后已经使用 PD 加重力前馈保持当前位置。
 
-界面按 [Apple 设计原则](https://developer.apple.com/design/human-interface-guidelines/design-principles) 聚焦当前任务：全屏机械臂视图、一个状态提示和底部操作工具。不再提供关节滑块、PD 调参、零力矩模式、坐标系切换或步进设置，对应 Web 命令与旧模式分支也已删除。电机使用固定的原有 `MOTION_KP/MOTION_KD`，期望速度与前馈力矩均为零。
+界面按 [Apple 设计原则](https://developer.apple.com/design/human-interface-guidelines/design-principles) 聚焦当前任务：全屏机械臂视图、一个状态提示和底部操作工具。不再提供关节滑块、PD 调参、零力矩模式、坐标系切换或步进设置，对应 Web 命令与旧模式分支也已删除。电机使用固定的原有 `MOTION_KP/MOTION_KD`，期望速度为零；硬件前馈力矩由实测姿态的重力模型持续更新。
 
 | 操作 | 方式 |
 | --- | --- |
@@ -213,9 +215,9 @@ EE 路径参考 [YAM Kinematics](https://github.com/i2rt-robotics/i2rt/blob/main
 
 目标自碰撞检查与 YAM 一样，使用独立 MuJoCo 数据检查将要发送的姿态，忽略平面和相邻刚性连杆，穿透深度超过 1 mm 时阻止更新指令并保留上一条已接受目标。内存模型开启现有网格的接触标志，固定夹爪零件按所属刚性连杆判断相邻关系，不修改源 MJCF。网格接触使用 MuJoCo 凸包近似，尚未用实物标定；没有整段路径、桌面或外部环境避障。运动学仿真只验证模型与目标求解，不模拟 PD 跟踪、负载或实物接触。
 
-保留的 reBot 适配包括 RS 原生扩展帧协议、模型/TCP、软件零位、关节及编码范围、默认 PD 增益、UID/模式核验、通信故障处理和退出位置保持；不复制 YAM 另一款电机的增益数值、CAN 事务时序或扩大的硬件关节边界。当前仍只控制六轴，不改变夹爪状态，未加入 YAM 的夹爪/示教手柄功能。重力与摩擦前馈均为零。
+保留的 reBot 适配包括 RS 原生扩展帧协议、模型/TCP、软件零位、关节及编码范围、默认 PD 增益、UID/模式核验、通信故障处理和退出位置保持；不复制 YAM 另一款电机的增益数值、CAN 事务时序或扩大的硬件关节边界。当前仍只控制六轴，不改变夹爪状态，未加入 YAM 的夹爪/示教手柄功能。摩擦前馈为零。
 
-离线测试使用真实 Mink 与虚拟 CAN，覆盖完整位姿直接发送、边界附近实测 IK 初值、目标自碰撞拦截及显示隔离、不可达目标、TCP 偏移、软件零位、MIT 增益、零速度/零前馈、UID/模式检查、缺失反馈、慢 IK 时 CAN 继续刷新、停止期间不发布新目标及退出保持。Web 协议测试另覆盖开始控制的确认门控、固定 MIT 增益、拒绝旧模式与调参命令、完整位姿与目标序号、错误消息隔离、静态资源和路径边界、断线后保持以及终端转义序列不误停；移动/旋转、数值输入、确认弹窗和刷新恢复另在浏览器验证。运行：
+离线测试使用真实 Mink 与虚拟 CAN，覆盖完整位姿直接发送、边界附近实测 IK 初值、目标自碰撞拦截及显示隔离、不可达目标、TCP 偏移、软件零位、MIT 增益、零速度、实测姿态重力前馈及异常检查、UID/模式检查、缺失反馈、慢 IK 时 CAN 继续刷新、停止期间不发布新目标及退出保持。Web 协议测试另覆盖开始控制的确认门控、固定 MIT 增益、拒绝旧模式与调参命令、完整位姿与目标序号、错误消息隔离、静态资源和路径边界、断线后保持以及终端转义序列不误停；移动/旋转、数值输入、确认弹窗和刷新恢复另在浏览器验证。运行：
 
 ```bash
 python -m unittest discover -s tests -p 'test_rebot_ee*.py' -v

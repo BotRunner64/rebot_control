@@ -18,12 +18,13 @@ import yaml
 
 from rebot import CONFIG, load_config, resolve_channel, verify_identity
 from rebot_hand_guiding import SETTINGS_PATH, StopKey, load_settings
+from rebot_gravity import GravityModel
 from rebot_kinematics import CartesianIK, SIM_START, pose_matrix, vector6
 from rebot_mit import MotorBus
 from rebot_motion import MOTION_KD, MOTION_KP
 from rebot_teleop import position_bounds, validate_pose
 from rebot_teleop_runtime import LoopTiming
-from rebot_ee_runtime import MotorWorker, request_stop
+from rebot_ee_runtime import GravityFeedforward, MotorWorker, request_stop
 
 
 @dataclass
@@ -60,7 +61,7 @@ def target_pose(ik, pose, offset):
 
 
 def track(ik, target, stop, keys, cfg, *, duration=None, viewer=None, bus=None,
-          reference=None, initial_goal=False):
+          reference=None, initial_goal=False, gravity=None):
     """Publish targets at 50 Hz; an independent worker continuously services CAN."""
     timing = LoopTiming("ee-target", 50)
     started = time.monotonic()
@@ -68,7 +69,8 @@ def track(ik, target, stop, keys, cfg, *, duration=None, viewer=None, bus=None,
     previously_enabled = None
     hold_q = actual.copy()
     pending_goal = target.copy() if initial_goal else None
-    motor = MotorWorker(bus, reference, ik.lower, ik.upper, cfg, stop) if bus is not None else None
+    motor = (MotorWorker(bus, reference, ik.lower, ik.upper, cfg, stop, gravity)
+             if bus is not None else None)
     try:
         with motor if motor is not None else nullcontext():
             while not stop.is_set():
@@ -157,7 +159,7 @@ def control(*, hardware=False, side="right", config=CONFIG, settings_path=SETTIN
     if hardware and start_joints is not None:
         raise ValueError("--start-joints is simulation-only; hardware always starts at measured angles.")
     cfg = load_settings(settings_path)
-    arm = channel = reference = None
+    arm = channel = reference = gravity = None
     lower = upper = None
     if hardware:
         arms = load_config(config)
@@ -165,6 +167,7 @@ def control(*, hardware=False, side="right", config=CONFIG, settings_path=SETTIN
             raise ValueError(f"Bind and calibrate the {side} reBot arm first.")
         arm = arms[side]
         reference, lower, upper = position_bounds(arm, 6, 270.)
+        gravity = GravityFeedforward(GravityModel(), reference, cfg)
         channel = resolve_channel(arm)
     start = SIM_START.copy() if start_joints is None else np.radians(vector6(start_joints, "Start joints"))
     if hardware:
@@ -188,7 +191,8 @@ def control(*, hardware=False, side="right", config=CONFIG, settings_path=SETTIN
                     verify_identity(bus, arm)
                     raw = validate_pose(bus.positions(), reference, ik.lower, ik.upper)
                     ik.reset(raw - reference)
-                    bus.set_hold(raw, np.zeros(6), MOTION_KP, MOTION_KD)
+                    bus.set_hold(raw, gravity(raw), MOTION_KP, MOTION_KD)
+                    bus.hold_gravity = gravity
                     bus.prepare()
                     raw = validate_pose(bus.positions(), reference, ik.lower, ik.upper)
                     ik.reset(raw - reference)
@@ -200,16 +204,17 @@ def control(*, hardware=False, side="right", config=CONFIG, settings_path=SETTIN
                 if stop.is_set() or (viewer is not None and not viewer.is_running()):
                     return Result(math.inf, math.inf, False, True)
                 if bus is not None:
-                    bus.set_hold(raw, np.zeros(6), MOTION_KP, MOTION_KD)
+                    bus.set_hold(raw, gravity(raw), MOTION_KP, MOTION_KD)
                     bus.enable(raw)
                     if stop.is_set():
                         return Result(math.inf, math.inf, False, True)
                     # Refresh the entire feedback batch after the sequential enable handshake.
-                    bus.command_position(raw, np.zeros(6), np.zeros(6), MOTION_KP, MOTION_KD,
+                    bus.command_position(raw, np.zeros(6), gravity(raw), MOTION_KP, MOTION_KD,
                                          time.monotonic() + cfg["max_feedback_age_s"])
                 mode = f"HARDWARE {side}" if hardware else "KINEMATIC SIMULATION"
                 print(f"EE {mode}; base-frame target; direct IK joint targets without host speed limiting. "
-                      "MIT desired velocity and feedforward torque are zero; target self-collision checks enabled.", flush=True)
+                      "MIT desired velocity is zero; measured-pose gravity feedforward is enabled on hardware; "
+                      "target self-collision checks enabled.", flush=True)
                 stop_help = ("Use the web STOP & hold button or terminal Ctrl-C to stop; "
                              "browser disconnects and terminal Space/Esc/Q do not stop control. "
                              if not headless else
@@ -221,7 +226,7 @@ def control(*, hardware=False, side="right", config=CONFIG, settings_path=SETTIN
                     print("Start control to drag the target. T: move; R: rotate; "
                           "F: fit view; Esc: cancel drag. Browser reconnect preserves control.", flush=True)
                 return track(ik, target, stop, keys, cfg, duration=duration, viewer=viewer, bus=bus,
-                             reference=reference,
+                             reference=reference, gravity=gravity,
                              initial_goal=pose is not None or offset is not None)
 
 

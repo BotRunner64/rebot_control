@@ -169,15 +169,29 @@ class HardwareTests(unittest.TestCase):
         self.arm = {"reference_rad": [*self.reference, 0.], "motor_uids": dict(self.virtual.uids),
                     "models": ["rs-06"] * 3 + ["rs-00"] * 4}
         self.commands = []
+        self.measured = []
+        self.mechanical_reads = []
         self.failure = None
 
     def factory(self, *args, **kwargs):
         with patch.object(mit, "check_channel"), patch.object(mit.can, "Bus", return_value=self.virtual):
             bus = mit.MotorBus(*args, **kwargs)
         self.bus = bus
+        positions = bus.positions
+
+        def read_positions():
+            raw = positions()
+            self.mechanical_reads.append(np.asarray(raw).copy())
+            return raw
+
+        bus.positions = read_positions
         command = bus.command_position
 
         def record(*values):
+            # The enable-refresh batch uses the validated startup mechanical read.
+            raw = (np.asarray(values[0]) if not self.commands else
+                   np.array([bus.feedback[i]["position"] for i in range(1, 7)]))
+            self.measured.append(raw - self.reference)
             self.commands.append(values)
             if self.failure == "feedback" and len(self.commands) == 2:
                 self.virtual.drop_holds.add(4)
@@ -220,12 +234,49 @@ class HardwareTests(unittest.TestCase):
         self.assertTrue(moving)
         np.testing.assert_allclose(moving[0][0], self.reference + solution, atol=.0004)
         self.assertGreater(float(np.max(np.abs(moving[0][0] - self.commands[0][0]))), .3 / 200)
-        for position, velocity, gravity, kp, kd, deadline in self.commands[1:]:
+        model = ee.GravityModel()
+        scale = ee.load_settings()["gravity_scale"]
+        for measured, (position, velocity, gravity, kp, kd, deadline) in zip(self.measured, self.commands):
             np.testing.assert_array_equal(velocity, np.zeros(6))
-            np.testing.assert_array_equal(gravity, np.zeros(6))
+            np.testing.assert_allclose(gravity, model.gravity(measured) * scale, atol=1e-10)
             np.testing.assert_array_equal(kp, ee.MOTION_KP)
             np.testing.assert_array_equal(kd, ee.MOTION_KD)
+        self.assertGreater(np.linalg.norm(self.commands[0][2]), 1.)
+        self.assertGreater(np.linalg.norm(self.commands[-1][2] - self.commands[0][2]), 1e-4)
         self.assert_closed_and_holding()
+        frames = [msg for msg in self.virtual.sent if (msg.arbitration_id >> 24) & 31 == 1]
+        for batch, q in ((frames[:12], TEST_START),
+                         (frames[-6:], self.mechanical_reads[-1] - self.reference)):
+            expected_gravity = model.gravity(q) * scale
+            for frame in batch:
+                motor = (frame.arbitration_id & 255) - 1
+                decoded = mit.decode_mit(frame, self.arm["models"][motor])
+                self.assertAlmostEqual(decoded["gravity"], expected_gravity[motor], delta=.002)
+
+    def test_invalid_gravity_prevents_motor_enable(self):
+        for value in (math.nan, math.inf, 100.):
+            with self.subTest(value=value):
+                self.setUp()
+                with patch.object(ee.GravityModel, "gravity", return_value=np.full(6, value)):
+                    with self.assertRaises((ValueError, RuntimeError)):
+                        self.run_control()
+                self.assertTrue(self.virtual.closed)
+                self.assertFalse(any((msg.arbitration_id >> 24) & 31 == 3 for msg in self.virtual.sent))
+
+    def test_gravity_failure_during_control_preserves_last_valid_hold(self):
+        original = ee.GravityModel.gravity
+        calls = 0
+
+        def fail(model, q):
+            nonlocal calls
+            calls += 1
+            return original(model, q) if calls < 6 else np.full(6, math.nan)
+
+        with patch.object(ee.GravityModel, "gravity", fail):
+            with self.assertRaisesRegex(ValueError, "Gravity feedforward"):
+                self.run_control()
+        self.assert_closed_and_holding()
+        self.assertTrue(all(abs(record[1]) < 15 for record in self.bus.hold_records.values()))
 
     def test_feedback_failure_holds_and_closes_without_disabling(self):
         self.failure = "feedback"
@@ -255,6 +306,11 @@ class HardwareTests(unittest.TestCase):
         result = self.run_control(offset=[.03, 0., 0.])
         self.assertFalse(result.reached)
         self.assertGreater(len(self.commands), 2)
+        model = ee.GravityModel()
+        scale = ee.load_settings()["gravity_scale"]
+        for measured, command in zip(self.measured, self.commands):
+            np.testing.assert_allclose(command[2], model.gravity(measured) * scale, atol=1e-10)
+        self.assertGreater(np.linalg.norm(self.commands[-1][0] - self.reference - self.measured[-1]), .01)
         self.assert_closed_and_holding()
 
     def test_slow_ik_does_not_interrupt_can_feedback_or_reject_the_solution(self):

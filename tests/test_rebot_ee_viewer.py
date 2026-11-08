@@ -176,7 +176,7 @@ class ViewerTests(unittest.TestCase):
         for command in hardware.commands:
             np.testing.assert_array_equal(command[3], ee.MOTION_KP)
             np.testing.assert_array_equal(command[4], ee.MOTION_KD)
-            np.testing.assert_array_equal(command[2], np.zeros(6))
+            self.assertGreater(np.linalg.norm(command[2]), 1.)
         hardware.assert_closed_and_holding()
 
     def test_disconnect_and_bad_packets_do_not_stop_or_enable_the_controller(self):
