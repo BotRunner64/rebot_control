@@ -5,7 +5,7 @@ import io
 import math
 from pathlib import Path
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import mujoco
 import numpy as np
@@ -88,6 +88,7 @@ class LifecycleTests(unittest.TestCase):
         self.arms = {side: {} for side in mirror.SIDES}
         self.references = {side: [0.] * 7 for side in mirror.SIDES}
         self.channels = dict(left="can0", right="can1")
+        self.check_channel = MagicMock()
         self.readers = {side: MagicMock() for side in mirror.SIDES}
         for reader in self.readers.values():
             reader.positions.return_value = [0.] * 7
@@ -119,6 +120,7 @@ class LifecycleTests(unittest.TestCase):
 
         for name, value in (
                 ("load_bindings", lambda config: (self.arms, self.references, self.channels)),
+                ("check_channel", self.check_channel),
                 ("load_model", lambda target: (MagicMock(), MagicMock())),
                 ("open_reader", open_reader), ("verify_identity", lambda *args: None),
                 ("open_viewer", open_viewer), ("set_model_pose", pose)):
@@ -135,6 +137,23 @@ class LifecycleTests(unittest.TestCase):
     def assert_read_only(self):
         for reader in self.readers.values():
             self.assertEqual({call[0] for call in reader.method_calls}, {"positions"})
+
+    def test_both_channels_are_prepared_before_opening_readers(self):
+        with patch.object(mirror, "open_reader", wraps=mirror.open_reader) as opened:
+            self.check_channel.side_effect = lambda *args, **kwargs: opened.assert_not_called()
+            mirror.mirror()
+        self.assertEqual(self.check_channel.call_args_list,
+                         [call("can0", configure=True), call("can1", configure=True)])
+        self.assert_read_only()
+
+    def test_configuration_failure_does_not_open_readers_or_viewer(self):
+        self.check_channel.side_effect = [None, RuntimeError("Setup failed")]
+        with patch.object(mirror, "open_reader") as opened, \
+                patch.object(mirror, "open_viewer") as viewer:
+            with self.assertRaisesRegex(RuntimeError, "Setup failed"):
+                mirror.mirror()
+        opened.assert_not_called()
+        viewer.assert_not_called()
 
     def test_missing_feedback_freezes_both_models_and_recovers(self):
         self.readers["left"].positions.side_effect = [[0.] * 7, [1.] * 7, [2.] * 7]

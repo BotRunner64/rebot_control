@@ -12,7 +12,7 @@ import time
 import can
 import yaml
 
-from rebot import CONFIG, load_config, open_reader, resolve_channel, verify_identity
+from rebot import CONFIG, check_channel, load_config, open_reader, resolve_channel, verify_identity
 from stararm_teleop import JOINTS, SIDES, load_model, open_viewer
 
 GRIPPER_OPEN_RAD = math.radians(270)
@@ -78,6 +78,8 @@ def mirror(config=CONFIG, fps=30.0, gripper_open_rad=GRIPPER_OPEN_RAD, *, port=8
     if not math.isfinite(gripper_open_rad) or gripper_open_rad <= 0:
         raise ValueError("The gripper opening angle must be finite and positive.")
     arms, references, channels = load_bindings(config)
+    for side in SIDES:
+        check_channel(channels[side], configure=True)
     model, data = load_model("rebot")
     with ExitStack() as stack:
         readers = {}

@@ -70,7 +70,7 @@ conda activate rebot_control
 python rebot_mirror.py
 ```
 
-程序读取 `rebot.local.yaml`，按 USB 路径解析两块 CAN 适配器，核验两臂七个电机的 UID，再打开本机 Three.js 双臂页面。手动拖动实体 Rebot Arm 左右臂，仿真中的对应机械臂跟随显示。沿用现有 RS 模型、桌面和双臂布局。若 CAN 尚未启动，先运行 `python rebot.py scan`。
+程序读取 `rebot.local.yaml`，按 USB 路径解析两块 CAN 适配器，自动检查并按需将两路 CAN 配置为 UP、1 Mbps，再核验两臂七个电机的 UID，打开本机 Three.js 双臂页面。拔插适配器后直接重新运行 `python rebot_mirror.py`，无需先运行 `scan` 或手动执行 `ip link`；接口已就绪时不重新配置，需配置时可能提示输入 sudo 密码，仅网络配置命令提权。两路接口都配置成功后才开始查询电机，配置失败则停止启动。手动拖动实体 Rebot Arm 左右臂，仿真中的对应机械臂跟随显示。沿用现有 RS 模型、桌面和双臂布局。
 
 实体臂应先处于可手动拖动状态，并在拖动时托稳。此脚本只查询角度，启动、运行和退出均不发送使能、卸力、运动、模式切换或硬件零位指令，也不提供重力补偿。如果实物已锁力，脚本不会自动解除锁力。点击页面 `Close viewer` 或在终端按 Ctrl-C 退出并关闭两路 CAN 连接，不改写本地标定。
 
