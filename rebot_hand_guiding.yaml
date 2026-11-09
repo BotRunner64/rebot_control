@@ -2,6 +2,7 @@
 rate_hz: 50
 max_sample_gap_s: 0.10
 max_feedback_age_s: 0.08
+# Legacy compatibility setting; temperature is recorded without host-side shutdown.
 max_temperature_c: 65
 # Retain initial pose and full gravity support before allowing drag release.
 startup_duration_s: 2.0

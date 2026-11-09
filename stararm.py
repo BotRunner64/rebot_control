@@ -16,6 +16,10 @@ import yaml
 CONFIG = Path(__file__).with_name("stararm.local.yaml")
 
 
+class AngleFeedbackError(ValueError):
+    """A monitor request did not return valid, fresh angles."""
+
+
 def load_config(config=CONFIG):
     arms = yaml.safe_load(config.read_text()) if config.exists() else {}
     if not isinstance(arms, dict) or any(
@@ -74,18 +78,19 @@ def bind(side, port, baudrate, config=CONFIG, replace=False):
     print(f"Saved {side} -> {path}; configuration: {config}")
 
 
-def read_angles(bus):
-    """Require fresh, checksum-validated monitor data for all seven servos."""
+def read_angles(bus, servo_ids=range(7)):
+    """Require fresh, checksum-validated monitor data for the selected servos."""
+    servo_ids = list(servo_ids)
     bus.uart.reset_input_buffer()
     bus.pkt_buffer.empty_buffer()
-    for servo_id in range(7):
+    for servo_id in servo_ids:
         bus.servos[servo_id].angle_monitor = None
-    states = bus.send_sync_servo_monitor(list(range(7)), realtime=True)
-    angles = [getattr(states.get(i), "angle_monitor", None) for i in range(7)]
-    invalid = [i for i, value in enumerate(angles)
+    states = bus.send_sync_servo_monitor(servo_ids, realtime=True)
+    angles = [getattr(states.get(i), "angle_monitor", None) for i in servo_ids]
+    invalid = [i for i, value in zip(servo_ids, angles)
                if value is None or not math.isfinite(value) or abs(value) > 368640]
     if invalid:
-        raise ValueError(f"Missing or invalid angle feedback from servo IDs {invalid}.")
+        raise AngleFeedbackError(f"Missing or invalid angle feedback from servo IDs {invalid}.")
     return angles
 
 
@@ -107,19 +112,65 @@ def capture_pose(bus):
     return (np.array(samples[0]) + np.median(changes, axis=0)).tolist()
 
 
-def calibrate(side, replace=False, config=CONFIG):
+def capture_gripper(bus):
+    import statistics
+
+    samples = []
+    failures = 0
+    last_error = None
+    for _ in range(30):
+        try:
+            samples.append(read_angles(bus, (6,))[0])
+        except AngleFeedbackError as error:
+            failures += 1
+            last_error = error
+        time.sleep(.02)
+        if len(samples) == 20:
+            break
+    if len(samples) != 20:
+        raise ValueError(f"Collected only {len(samples)}/20 valid gripper samples in 30 attempts; "
+                         "calibration was not saved. Check the leader connection and retry.") from last_error
+    if max(samples) - min(samples) > .2 + 1e-9:
+        raise ValueError("The gripper moved during capture. Hold it closed and retry.")
+    if failures:
+        print(f"Gripper capture recovered from {failures} invalid feedback sample(s).")
+    return statistics.median(samples)
+
+
+def gripper_reference(arm):
+    reference = arm.get("reference_deg")
+    if (not isinstance(reference, list) or len(reference) != 7
+            or any(type(value) not in (int, float) or not math.isfinite(value)
+                   for value in reference)):
+        raise ValueError("Gripper-only calibration requires seven existing finite reference angles.")
+    return reference.copy()
+
+
+def calibrate(side, replace=False, config=CONFIG, gripper_only=False):
     arms = load_config(config)
     if side not in arms:
         raise ValueError(f"Bind {side} before calibrating it.")
     arm = arms[side]
+    if gripper_only:
+        gripper_reference(arm)
     if "reference_deg" in arm and not replace:
         raise ValueError("A calibration already exists; use --replace to recalibrate.")
     with serial.Serial(arm["port"], baudrate=arm["baudrate"], timeout=0,
                        exclusive=True) as uart:
-        reference = capture_pose(UartServoManager(uart))
+        bus = UartServoManager(uart)
+        reference = capture_gripper(bus) if gripper_only else capture_pose(bus)
     latest = load_config(config)
-    if latest.get(side, {}).get("port") != arm["port"]:
+    if any(latest.get(side, {}).get(key) != arm[key] for key in ("port", "baudrate")):
         raise ValueError("The binding changed during calibration; calibration was not saved.")
+    if gripper_only:
+        updated = gripper_reference(latest[side])
+        previous = updated[6]
+        updated[6] = reference
+        latest[side]["reference_deg"] = updated
+        save_config(latest, config)
+        print(f"Saved {side} gripper closed reference: {previous:g} -> {reference:g} deg; "
+              "J1-J6 references preserved.")
+        return
     latest[side]["reference_deg"] = reference
     latest[side].pop("directions", None)
     save_config(latest, config)
@@ -140,6 +191,8 @@ def main():
     calibration = commands.add_parser("calibrate", help="Record the default reference pose immediately")
     calibration.add_argument("side", choices=("left", "right"))
     calibration.add_argument("--replace", action="store_true")
+    calibration.add_argument("--gripper-only", action="store_true",
+                             help="Capture only the closed handle reference; preserve J1-J6")
     for command in (scan, binding):
         command.add_argument("--baudrate", type=int, default=1_000_000)
     args = parser.parse_args()
@@ -147,7 +200,7 @@ def main():
         parser.error("Baud rate must be positive.")
     try:
         if args.command == "calibrate":
-            calibrate(args.side, args.replace)
+            calibrate(args.side, args.replace, gripper_only=args.gripper_only)
             return 0
         if args.command == "bind":
             bind(args.side, args.port, args.baudrate, replace=args.replace)

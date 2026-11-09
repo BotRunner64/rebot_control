@@ -21,10 +21,13 @@ from rebot import CONFIG, load_config, resolve_channel, verify_identity
 from rebot_hand_guiding import SETTINGS_PATH, StopKey, load_settings
 from rebot_mit import LIMITS, MotorBus
 from rebot_motion import MOTION_KD, MOTION_KP
-from stararm import CONFIG as LEADER_CONFIG, load_config as load_leaders, read_angles
+from rebot_gripper import (GripperController, SETTINGS_PATH as GRIPPER_SETTINGS_PATH,
+                           load_settings as load_gripper_settings)
+from stararm import CONFIG as LEADER_CONFIG, AngleFeedbackError, load_config as load_leaders, read_angles
 from stararm_teleop import DIRECTIONS, release_torque
-from rebot_teleop_runtime import (MOTOR_HZ, TARGET_HZ, SharedFrame, LoopTiming, child_signals,
-                                 fresh, stop_on_error, supervisor_alive, wait_phase)
+from rebot_teleop_runtime import (MOTOR_HZ, TARGET_HZ, FEEDBACK_ATTEMPTS, FEEDBACK_TIMEOUT_S,
+                                 SharedFrame, StopSignal, LoopTiming, child_signals,
+                                 latest, stop_on_error, supervisor_alive, wait_phase)
 
 
 # Official Seeed LeRobot RS follower limits, ordered J1-J6 and gripper.
@@ -65,10 +68,19 @@ def load_bindings(config, leader_config, side):
     return sides, arms, leaders, channels
 
 
-def map_target(raw, reference, lower, upper):
+def map_target(raw, reference, lower, upper, gripper_close_tolerance_deg=1.):
     # Preserve SDK multi-turn angles; wrapping at +/-180 degrees would jump.
     relative = np.radians(angles(raw, "Leader feedback") - angles(reference, "Leader reference"))
     target = relative * np.array([*DIRECTIONS, 6.])
+    if len(lower) == 7:
+        if (type(gripper_close_tolerance_deg) not in (int, float)
+                or not math.isfinite(gripper_close_tolerance_deg)
+                or not 0 <= gripper_close_tolerance_deg < 45.):
+            raise ValueError("Gripper leader closing tolerance must be finite and in [0, 45) degrees.")
+        # Collapse only the closing margin; preserve the 45-degree open endpoint.
+        margin = math.radians(gripper_close_tolerance_deg)
+        openness = np.clip((relative[6] - margin) / (math.radians(45) - margin), 0., 1.)
+        target[6] = lower[6] + openness * (upper[6] - lower[6])
     return np.clip(target[:len(lower)], lower, upper)
 
 
@@ -137,6 +149,7 @@ def leader_worker(name, arm, frame, phases, ready, prepared, stop, heartbeat, re
     with source_factory(arm) as source, stop_on_error(stop):
         timing = LoopTiming(name)
         released = False
+        failures = 0
         try:
             while not stop.is_set():
                 supervisor_alive(heartbeat)
@@ -145,7 +158,25 @@ def leader_worker(name, arm, frame, phases, ready, prepared, stop, heartbeat, re
                     released = True
                     prepared.set()
                 began = timing.tick()
-                values = angles(source.read(), "Leader feedback")
+                try:
+                    raw = source.read()
+                except AngleFeedbackError as exc:
+                    if stop.is_set():
+                        break
+                    failures += 1
+                    if failures >= FEEDBACK_ATTEMPTS:
+                        raise AngleFeedbackError(
+                            f"{name}: angle feedback failed after {failures} attempts: {exc}") from exc
+                    print(f"{name}: angle feedback attempt {failures}/{FEEDBACK_ATTEMPTS} failed; "
+                          f"keeping the last complete target ({exc}).", file=sys.stderr, flush=True)
+                    stop.wait(.001)
+                    continue
+                if stop.is_set():
+                    break
+                if failures:
+                    print(f"{name}: angle feedback recovered after {failures} failed attempt(s).", flush=True)
+                failures = 0
+                values = angles(raw, "Leader feedback")
                 frame.publish(values, began)
                 ready.set()
                 timing.complete(began, began)
@@ -167,9 +198,11 @@ def target_worker(sides, leaders, arms, count, gripper_open_deg, sources, target
             supervisor_alive(heartbeat)
             values, ages = [], []
             for name in sides:
-                raw, source_at = fresh(sources[name], time.monotonic(), cfg["max_feedback_age_s"], name)
+                raw, source_at = latest(sources[name], name)
                 reference, low, high = bounds[name]
-                values.extend(reference + map_target(raw, leaders[name]["reference_deg"], low, high))
+                tolerance = cfg["gripper"].leader_close_tolerance_deg if count == 7 else 0.
+                values.extend(reference + map_target(raw, leaders[name]["reference_deg"], low, high,
+                                                     tolerance))
                 ages.append(source_at)
             if not stop.is_set():
                 # Publish the complete pair atomically and preserve acquisition age.
@@ -184,6 +217,18 @@ def motor_worker(name, index, arm, channel, count, gripper_open_deg, targets, ph
                  ready, prepared, enabled, stop, heartbeat, reports, cfg, bus_factory):
     reference, low, high = position_bounds(arm, count, gripper_open_deg)
     kp, kd = np.append(MOTION_KP, 50.)[:count], np.append(MOTION_KD, 4.)[:count]
+    gripper = None
+    if count == 7:
+        settings = cfg["gripper"]
+        kp[6], kd[6] = settings.kp, settings.kd
+        gripper = GripperController(reference[6] + low[6], reference[6] + high[6], settings)
+    control_kp, control_kd = kp.copy(), kd.copy()
+    feedback_options = dict(max_attempts=FEEDBACK_ATTEMPTS, reply_timeout_s=FEEDBACK_TIMEOUT_S, stop=stop)
+    command_options = {}
+    if gripper is not None:
+        # Native PD must not add motor torque after the host's total effort limit.
+        control_kp[6] = control_kd[6] = 0.
+        command_options["torque_limits"] = {7: settings.torque_limit_nm}
     zero = np.zeros(count)
     with bus_factory(channel, arm["models"], max_temperature=cfg["max_temperature_c"],
                      motor_count=count) as bus, stop_on_error(stop):
@@ -205,33 +250,43 @@ def motor_worker(name, index, arm, channel, count, gripper_open_deg, targets, ph
         enabled.set()
         if not wait_phase(phases["run"], stop, heartbeat):
             return
-        began = time.monotonic()
         # The mapper may not have published its first pair yet; no motion until it does.
         while not stop.is_set() and targets.read()[1] == 0:
             supervisor_alive(heartbeat)
-            if time.monotonic() - began > cfg["max_feedback_age_s"]:
-                raise TimeoutError("No initial teleoperation target arrived.")
             stop.wait(.001)
+        if gripper is not None and not stop.is_set():
+            # Sequential enable and the run barrier can age the first motor's
+            # reply. Refresh every axis at the existing hold pose before the
+            # gripper consumes feedback, without moving to the leader target.
+            supervisor_alive(heartbeat)
+            bus.command_position(raw, zero, zero, kp, kd,
+                                 None, **feedback_options)
+            if stop.is_set():
+                return
+            raw = validate_pose(bus.feedback_positions(math.inf), reference, low, high)
+            bus.set_hold(raw, zero, kp, kd)
         timing = LoopTiming(name, MOTOR_HZ)
-        previous = time.monotonic()
         try:
             while not stop.is_set():
                 began = timing.tick()
                 supervisor_alive(heartbeat)
-                if began - previous > cfg["max_sample_gap_s"]:
-                    raise TimeoutError("Motor control feedback gap exceeded the deadline.")
-                previous = began
-                pair, source_at = fresh(targets, time.monotonic(), cfg["max_feedback_age_s"], "Target pair")
+                pair, source_at = latest(targets, "Target pair")
                 target = pair[index * count:(index + 1) * count]
                 # Validate the consumer boundary as well as the mapper output.
                 if np.any(target < reference + low) or np.any(target > reference + high):
                     raise ValueError("Shared target exceeds the configured motor range.")
-                deadline = min(began + cfg["max_feedback_age_s"], source_at + cfg["max_feedback_age_s"])
+                torques = np.zeros(count)
+                if gripper is not None:
+                    feedback = bus.feedback_states(math.inf)[6]
+                    torques[6] = gripper.update(target[6], feedback["position"], feedback["velocity"])
                 if stop.is_set():
                     break
-                bus.command_position(target, zero, zero, kp, kd, deadline)
+                bus.command_position(target, zero, torques, control_kp, control_kd, None,
+                                     **feedback_options, **command_options)
+                if stop.is_set():
+                    break
                 # Each MIT command already returns position; avoid seven extra queries.
-                raw = validate_pose(bus.feedback_positions(cfg["max_feedback_age_s"]), reference, low, high)
+                raw = validate_pose(bus.feedback_positions(math.inf), reference, low, high)
                 bus.set_hold(raw, zero, kp, kd)
                 timing.complete(began, source_at)
                 timing.pace(stop)
@@ -251,6 +306,7 @@ def worker_entry(name, worker, args, stop, reports):
 
 def teleop(config=CONFIG, leader_config=LEADER_CONFIG, settings_path=SETTINGS_PATH,
            side="both", gripper_open_deg=270., gripper=True, *,
+           gripper_settings_path=GRIPPER_SETTINGS_PATH, gripper_torque_nm=None,
            source_factory=StarArmSource, bus_factory=MotorBus, startup_timeout=15., shutdown_timeout=5.):
     if not math.isfinite(gripper_open_deg) or not 0 < gripper_open_deg <= 270:
         raise ValueError("Gripper opening must be positive and at most the official 270-degree limit.")
@@ -259,10 +315,14 @@ def teleop(config=CONFIG, leader_config=LEADER_CONFIG, settings_path=SETTINGS_PA
     cfg = load_settings(settings_path)
     sides, arms, leaders, channels = load_bindings(config, leader_config, side)
     count = 7 if gripper else 6
+    if gripper:
+        cfg["gripper"] = load_gripper_settings(gripper_settings_path, gripper_torque_nm)
     for name in sides:
-        position_bounds(arms[name], count, gripper_open_deg)
+        _, low, high = position_bounds(arms[name], count, gripper_open_deg)
+        if gripper:
+            cfg["gripper"].validate_motor(LIMITS[arms[name]["models"][6]])
     context = mp.get_context("spawn")
-    stop = context.Event()
+    stop = StopSignal(context.Event())
     heartbeat = SharedFrame(context, 0)
     heartbeat.publish([], time.monotonic())
     sources = {name: SharedFrame(context, 7) for name in sides}
@@ -325,7 +385,7 @@ def teleop(config=CONFIG, leader_config=LEADER_CONFIG, settings_path=SETTINGS_PA
             stop.wait(.01)
         return False
 
-    old_signals = {sig: signal.signal(sig, lambda signum, frame: stop.set())
+    old_signals = {sig: signal.signal(sig, lambda signum, frame: stop.request())
                    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)}
     started_workers = []
     try:
@@ -334,6 +394,11 @@ def teleop(config=CONFIG, leader_config=LEADER_CONFIG, settings_path=SETTINGS_PA
                 print(f"PHYSICAL TELEOP multiprocessing: motor {MOTOR_HZ} Hz per arm; target {TARGET_HZ} Hz; "
                       "gravity compensation off, MIT target velocity zero. Support the Star Arm leaders. "
                       "Space/Esc/Q/Ctrl-C stops and holds.", flush=True)
+                if gripper:
+                    print(f"Gripper: leader closing tolerance {cfg['gripper'].leader_close_tolerance_deg:g} deg; "
+                          f"smooth closing preload {cfg['gripper'].close_preload_deg:g} motor deg; total host torque limit "
+                          f"+/-{cfg['gripper'].torque_limit_nm:g} Nm during tracking; "
+                          "native position hold on exit (not torque limited).", flush=True)
                 for process in workers:
                     process.start()
                     started_workers.append(process)
@@ -395,10 +460,15 @@ def main():
     parser.add_argument("--gripper-open-deg", type=float, default=270.,
                         help="Gripper motor angle from closed to open (maximum: 270 degrees)")
     parser.add_argument("--no-gripper", action="store_true", help="Leave motor 7 control unchanged")
+    parser.add_argument("--gripper-settings", type=Path, default=GRIPPER_SETTINGS_PATH,
+                        help="RS gripper host position gains and total torque limit YAML")
+    parser.add_argument("--gripper-torque-nm", type=float,
+                        help="Override the maximum absolute total gripper tracking torque in Nm")
     args = parser.parse_args()
     try:
         teleop(config=args.config, leader_config=args.leader_config, settings_path=args.settings,
-               side=args.side, gripper_open_deg=args.gripper_open_deg, gripper=not args.no_gripper)
+               side=args.side, gripper_open_deg=args.gripper_open_deg, gripper=not args.no_gripper,
+               gripper_settings_path=args.gripper_settings, gripper_torque_nm=args.gripper_torque_nm)
         return 0
     except (OSError, ValueError, RuntimeError, ImportError, can.CanError, yaml.YAMLError,
             subprocess.SubprocessError) as exc:

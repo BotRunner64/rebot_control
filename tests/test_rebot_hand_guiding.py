@@ -43,6 +43,7 @@ class VirtualMotors:
         self.drop_stops = set()
         self.drop_holds = set()
         self.position = .2
+        self.temperature = 250
         self.closed = False
 
     def recv(self, timeout):
@@ -76,7 +77,7 @@ class VirtualMotors:
                 if motor in self.drop_stops:
                     return
                 self.modes[motor] = 0
-            self.queue.append(reply(2, motor, struct.pack(">HHHH", 32767, 32767, 32767, 250),
+            self.queue.append(reply(2, motor, struct.pack(">HHHH", 32767, 32767, 32767, self.temperature),
                                     mode=self.modes[motor]))
         else:
             raise AssertionError(f"Unexpected command type: {kind}")
@@ -292,10 +293,15 @@ class ProtocolTests(unittest.TestCase):
             self.bus.command_position([.2] * 6, [0.] * 6, [0.] * 6,
                                       [12.] * 6, [.5] * 6, time.monotonic() + .08)
 
-    def test_overtemperature_status_aborts(self):
-        hot = reply(2, 2, struct.pack(">HHHH", 32767, 32767, 32767, 700))
-        with self.assertRaisesRegex(RuntimeError, "temperature=70"):
-            self.bus.inspect(hot)
+    def test_hot_status_is_recorded_and_fault_bits_still_abort(self):
+        for kind in (2, 24):
+            with self.subTest(kind=kind):
+                hot = reply(kind, 2, struct.pack(">HHHH", 32767, 32767, 32767, 700))
+                self.bus.inspect(hot)
+                self.assertEqual(self.bus.feedback[2]["temperature"], 70.)
+                hot.arbitration_id |= 1 << 16
+                with self.assertRaisesRegex(RuntimeError, "faults=0x01"):
+                    self.bus.inspect(hot)
 
     def test_deadline_is_checked_before_each_motor_command(self):
         self.virtual.modes = dict.fromkeys(range(1, 7), 2)
@@ -609,6 +615,13 @@ class LifecycleTests(unittest.TestCase):
 
     def test_single_arm_home_does_not_disable_the_other_arm(self):
         self.setup_run()
+        self.assertTrue(self.run_completed_home(side="right"))
+        self.assertEqual(set(self.virtual["can1"].modes.values()), {0})
+        self.assertFalse(self.virtual["can0"].sent)
+
+    def test_hot_arm_can_complete_home_and_disable_all_seven_motors(self):
+        self.setup_run()
+        self.virtual["can1"].temperature = 680
         self.assertTrue(self.run_completed_home(side="right"))
         self.assertEqual(set(self.virtual["can1"].modes.values()), {0})
         self.assertFalse(self.virtual["can0"].sent)

@@ -1,0 +1,13 @@
+# Absolute host-computed PD torque limit, including preload; not fingertip force.
+torque_limit_nm: 1.0
+# Motor-angle gains; unchanged when the configured opening travel changes.
+kp: 12.0
+kd: 0.5
+# Leader handle angles within this distance of calibrated closure map to closed.
+# The remaining handle stroke is rescaled to preserve the fully open endpoint.
+leader_close_tolerance_deg: 1.0
+# Virtual follower motor target offset in the closing direction at full closure.
+# Zero disables preload. This replaces fixed friction feedforward.
+close_preload_deg: 1.0
+# Smoothly introduce preload over the last five degrees of follower motor travel.
+close_preload_window_deg: 5.0

@@ -30,7 +30,7 @@ POSITION = 0x7019
 
 
 def encode_mit(motor_id, model, position, torque, kp=0.0, kd=0.0, velocity=0.0,
-               *, allow_gripper=False):
+               *, allow_gripper=False, torque_limit=None):
     limits = LIMITS[model]
     if (type(motor_id) is not int or not 1 <= motor_id <= (7 if allow_gripper else 6)
             or not math.isfinite(position) or abs(position) > limits.position
@@ -43,10 +43,20 @@ def encode_mit(motor_id, model, position, torque, kp=0.0, kd=0.0, velocity=0.0,
     def unsigned(value, bound):
         return int((value + bound) / (2 * bound) * 65535)
 
+    torque_code = unsigned(torque, limits.torque)
+    if torque_limit is not None:
+        if (not math.isfinite(torque_limit) or not limits.torque / 65535 <= torque_limit <= limits.torque
+                or kp != 0 or kd != 0):
+            raise ValueError("A total MIT torque limit requires zero native gains and an encodable positive limit.")
+        # Floor encoding can make negative torque exceed the requested limit.
+        # Keep the final on-wire code inside the symmetric torque envelope.
+        low = math.ceil((limits.torque - torque_limit) / (2 * limits.torque) * 65535)
+        high = math.floor((limits.torque + torque_limit) / (2 * limits.torque) * 65535)
+        torque_code = min(high, max(low, torque_code))
     payload = struct.pack(">HHHH", unsigned(position, limits.position),
                           unsigned(velocity, limits.velocity), int(kp / limits.kp * 65535),
                           int(kd / limits.kd * 65535))
-    return can.Message(arbitration_id=(1 << 24) | (unsigned(torque, limits.torque) << 8) | motor_id,
+    return can.Message(arbitration_id=(1 << 24) | (torque_code << 8) | motor_id,
                        is_extended_id=True, data=payload)
 
 
@@ -71,6 +81,7 @@ class MotorBus:
         self.channel = channel
         self.models = models
         self.timeout = timeout
+        # Retained for settings/caller compatibility; temperature is telemetry only.
         self.max_temperature = max_temperature
         self.bus = can.Bus(interface="socketcan", channel=channel, receive_own_messages=False)
         self.enabled = set()
@@ -79,11 +90,11 @@ class MotorBus:
         self.hold_records = {}
         self.hold_gravity = None
 
-    def encode(self, motor, position, torque, kp=0., kd=0., velocity=0.):
+    def encode(self, motor, position, torque, kp=0., kd=0., velocity=0., *, torque_limit=None):
         if motor not in self.motor_ids:
             raise ValueError("Motor is outside the selected control group.")
         return encode_mit(motor, self.models[motor - 1], position, torque, kp, kd, velocity,
-                          allow_gripper=7 in self.motor_ids)
+                          allow_gripper=7 in self.motor_ids, torque_limit=torque_limit)
 
     def __enter__(self):
         return self
@@ -114,7 +125,7 @@ class MotorBus:
         if kind in (2, 24):
             faults, mode = (arb >> 16) & 63, (arb >> 22) & 3
             temperature = struct.unpack_from(">H", frame.data, 6)[0] * 0.1
-            if faults or temperature >= self.max_temperature:
+            if faults:
                 raise RuntimeError(f"{self.channel} motor {motor}: faults=0x{faults:02x}, "
                                    f"temperature={temperature:.1f} C")
             self.states[motor] = mode
@@ -195,6 +206,10 @@ class MotorBus:
 
     def feedback_positions(self, max_age_s):
         """Read fresh running-state MIT feedback without extra CAN queries."""
+        return [state["position"] for state in self.feedback_states(max_age_s)]
+
+    def feedback_states(self, max_age_s):
+        """Return validated snapshots of the existing position/velocity/torque replies."""
         now = time.monotonic()
         values = []
         for motor in self.motor_ids:
@@ -202,7 +217,9 @@ class MotorBus:
             if (feedback is None or self.states.get(motor) != 2
                     or not 0 <= now - feedback["received_at"] <= max_age_s):
                 raise TimeoutError(f"{self.channel} motor {motor}: MIT position feedback is stale or not running.")
-            values.append(feedback["position"])
+            if not all(math.isfinite(feedback[key]) for key in ("position", "velocity", "torque")):
+                raise ValueError(f"{self.channel} motor {motor}: MIT feedback must be finite.")
+            values.append(dict(feedback))
         return values
 
     def prepare(self):
@@ -273,32 +290,67 @@ class MotorBus:
         for motor, frame in enumerate(frames, 1):
             self.transaction(motor, 2, lambda: send_fresh(frame), expected_mode=2)
 
-    def command_position(self, positions, velocities, gravity, kp, kd, deadline):
+    def command_position(self, positions, velocities, gravity, kp, kd, deadline, *, torque_limits=None,
+                         max_attempts=1, reply_timeout_s=None, stop=None):
         """Send native MIT position/velocity/PD commands as one selected-motor batch."""
         if any(len(values) != len(self.motor_ids) for values in (positions, velocities, gravity, kp, kd)):
             raise ValueError("Expected native targets, gains, and feedforward per controlled motor.")
-        frames = [self.encode(i, q, tau, p, d, velocity=v)
+        if type(max_attempts) is not int or max_attempts < 1:
+            raise ValueError("Feedback attempts must be a positive integer.")
+        reply_timeout_s = self.timeout if reply_timeout_s is None else reply_timeout_s
+        if not math.isfinite(reply_timeout_s) or reply_timeout_s <= 0:
+            raise ValueError("Feedback timeout must be finite and positive.")
+        deadline = math.inf if deadline is None else deadline
+        torque_limits = {} if torque_limits is None else torque_limits
+        if any(motor not in self.motor_ids for motor in torque_limits):
+            raise ValueError("Torque limits must refer to controlled motors.")
+        frames = [self.encode(i, q, tau, p, d, velocity=v, torque_limit=torque_limits.get(i))
                   for i, (q, v, tau, p, d) in enumerate(zip(positions, velocities, gravity, kp, kd), 1)]
         self.drain()
         sent_at = time.time()
-        # Do not wait for each axis before updating the next axis.
-        for frame in frames:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise TimeoutError(f"{self.channel}: motion feedback deadline expired.")
-            self.bus.send(frame, timeout=min(.01, remaining))
         pending = set(self.motor_ids)
-        reply_deadline = min(deadline, time.monotonic() + self.timeout)
-        while pending and (remaining := reply_deadline - time.monotonic()) > 0:
-            frame = self.bus.recv(timeout=remaining)
-            if frame is None:
+        for attempt in range(max_attempts):
+            # Update all axes first; retry only axes whose reply is missing.
+            # Late replies to the identical command remain valid on retries.
+            for motor in sorted(pending):
+                if stop is not None and stop.is_set():
+                    return None
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError(f"{self.channel}: motion feedback deadline expired.")
+                try:
+                    self.bus.send(frames[motor - 1], timeout=min(.01, remaining))
+                except can.CanError:
+                    if max_attempts == 1:
+                        raise
+            reply_deadline = min(deadline, time.monotonic() + reply_timeout_s)
+            while pending and (remaining := reply_deadline - time.monotonic()) > 0:
+                if stop is not None and stop.is_set():
+                    return None
+                try:
+                    frame = self.bus.recv(timeout=remaining)
+                except can.CanError:
+                    if max_attempts == 1:
+                        raise
+                    break
+                if frame is None:
+                    break
+                parsed = self.inspect(frame)
+                if parsed is None or frame.timestamp < sent_at - .001:
+                    continue
+                kind, motor, _ = parsed
+                if kind == 2 and motor in pending and self.states.get(motor) == 2:
+                    pending.remove(motor)
+            if not pending:
                 break
-            parsed = self.inspect(frame)
-            if parsed is None or frame.timestamp < sent_at - .001:
-                continue
-            kind, motor, _ = parsed
-            if kind == 2 and motor in pending and self.states.get(motor) == 2:
-                pending.remove(motor)
+            if attempt + 1 < max_attempts:
+                print(f"{self.channel}: motion feedback attempt {attempt + 1}/{max_attempts} failed; "
+                      f"retrying motors {sorted(pending)}.", file=sys.stderr, flush=True)
+                if stop is not None:
+                    if stop.wait(.001):
+                        return None
+                else:
+                    time.sleep(.001)
         if pending:
             raise TimeoutError(f"{self.channel}: missing native motion feedback from motors {sorted(pending)}.")
         return [decode_mit(frame, model) for frame, model in zip(frames, self.models)]

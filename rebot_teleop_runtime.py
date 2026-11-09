@@ -10,7 +10,42 @@ import numpy as np
 
 MOTOR_HZ = 200
 TARGET_HZ = 500
+FEEDBACK_ATTEMPTS = 15
+FEEDBACK_TIMEOUT_S = .01
 SUPERVISOR_TIMEOUT_S = .5
+
+
+class StopSignal:
+    """Defer signal-handler requests until outside multiprocessing locks."""
+
+    def __init__(self, event):
+        self._event = event
+        self._signal_requested = False
+
+    def request(self):
+        # Python signal handlers may interrupt Event.wait/is_set/set while its
+        # non-reentrant condition lock is held. Do not touch IPC here.
+        self._signal_requested = True
+
+    def set(self):
+        self._event.set()
+
+    def is_set(self):
+        if self._signal_requested:
+            self._event.set()
+            self._signal_requested = False
+        return self._event.is_set()
+
+    def wait(self, timeout=None):
+        # A local signal does not notify the shared event until we poll it.
+        # Bound each wait so even long waits observe signal requests promptly.
+        deadline = math.inf if timeout is None else time.monotonic() + max(0., timeout)
+        while not self.is_set():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            self._event.wait(min(.01, remaining))
+        return True
 
 
 class SharedFrame:
@@ -44,6 +79,14 @@ class SharedFrame:
         return np.asarray(values), published, source_at
 
 
+def latest(frame, label):
+    """Read the last complete snapshot without expiring a cached setpoint."""
+    values, published, source_at = frame.read()
+    if published <= 0 or source_at <= 0:
+        raise TimeoutError(f"{label}: latest frame is missing.")
+    return values, source_at
+
+
 def fresh(frame, now, max_age, label):
     values, published, source_at = frame.read()
     # A writer may publish between the caller's clock read and our snapshot.
@@ -69,7 +112,7 @@ def wait_phase(event, stop, heartbeat):
 def child_signals(stop):
     # Handle termination cooperatively so active motor workers can install hold.
     for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
-        signal.signal(sig, lambda signum, frame: stop.set())
+        signal.signal(sig, lambda signum, frame: stop.request())
 
 
 @contextmanager
