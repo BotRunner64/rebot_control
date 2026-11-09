@@ -11,6 +11,7 @@ from rebot_teleop import JOINT_LIMITS_DEG
 
 
 MODEL_PATH = Path(__file__).with_name("models") / "rebot_rs.xml"
+EE_FRAME = "gripper_mount"
 JOINT_NAMES = tuple(f"joint{i}" for i in range(1, 7))
 SIM_START = np.zeros(6)
 
@@ -42,7 +43,7 @@ def validate_transform(value):
 
 
 def build_model(lower, upper, tcp_offset=(0., 0., 0.)):
-    """Fix visual fingers and replace display-only ranges in an in-memory model."""
+    """Fix visual fingers and apply a TCP offset in the fixed mounting frame."""
     import mujoco
 
     lower, upper = vector6(lower, "Lower limits"), vector6(upper, "Upper limits")
@@ -59,7 +60,7 @@ def build_model(lower, upper, tcp_offset=(0., 0., 0.)):
             else:
                 index = JOINT_NAMES.index(name)
                 joint.set("range", f"{lower[index]:.17g} {upper[index]:.17g}")
-    tcp = root.find(".//site[@name='tcp']")
+    tcp = root.find(f".//body[@name='{EE_FRAME}']/site[@name='tcp']")
     tcp.set("pos", " ".join(map(str, offset)))
     # Check target mesh contacts while keeping display geometry unchanged.
     for geom in root.findall(".//geom[@type='mesh']"):

@@ -73,13 +73,16 @@
                   <joint name="joint6" type="hinge" axis="0 0 -1" limited="true" range="-3.14 3.14" damping="2.0" frictionloss="0.1" />
                   <inertial pos="0.000018 0 0.0043481" mass="0.03" fullinertia="0.0000044227 0.0000043719 0.000008543 0 0.0000000002 0" />
                   <geom pos="0 0 0" group="1" contype="0" conaffinity="0" material="rs_motor_black_mat" type="mesh" mesh="link6" />
+                  <!-- Fixed mounting face: link6's front surface, independent of the gripper and fingertips. -->
+                  <body name="gripper_mount" pos="0 0 0.009">
+                    <site name="tcp" pos="0 0 0" size="0.01" rgba="1 0 0 0" group="2" />
+                  </body>
                   <body name="gripper_end" pos="0 0 0.16621" quat="-0.0000026 0.7071055 0.0000026 0.7071081">
                     <inertial pos="-0.1127517 0.0001284 -0.0000057" mass="0.65" fullinertia="0.00037354 0.0001583 0.00045353 -0.00000011 0.0000005 0.00000348" />
                     <geom pos="0 0 0" group="1" contype="0" conaffinity="0" material="rs_seeed_green_mat" type="mesh" mesh="pla7_green" />
                     <geom pos="0 0 0" group="1" contype="0" conaffinity="0" material="rs_anodized_silver_mat" type="mesh" mesh="cnc7" />
                     <geom pos="0 0 0" group="1" contype="0" conaffinity="0" material="rs_motor_black_mat" type="mesh" mesh="motor_7" />
                     <camera name="wrist_rgb" pos="-0.108727455312 0.00907532251669 0.107614316844" quat="-0.611836406866 -0.348746267763 0.349674379214 0.617867364792" fovy="62.82" />
-                    <site name="tcp" pos="0 0 0" size="0.01" rgba="1 0 0 0" group="2" />
                     <body name="gripper_coupler" pos="0 0 0">
                       <joint name="joint7" type="slide" axis="0 1 0" limited="true" range="0 0.05" damping="1.0" frictionloss="0.1" />
                       <inertial pos="0 0 0" mass="0.001" diaginertia="0.000001 0.000001 0.000001" />

@@ -11,6 +11,7 @@ import threading
 import time
 import unittest
 from unittest.mock import patch
+import xml.etree.ElementTree as ET
 
 import numpy as np
 from scipy.spatial.transform import Rotation
@@ -53,6 +54,28 @@ class KinematicsTests(unittest.TestCase):
         target = ik.pose()
         ik.solve(target)
         np.testing.assert_allclose(ik.q, np.zeros(6), atol=1e-9)
+
+    def test_default_tcp_is_the_mounting_face_with_link6_axes(self):
+        ik = CartesianIK(TEST_START)
+        for q in (SIM_START, TEST_START, TEST_START + np.radians([5., 4., -3., 2., 1., 30.])):
+            ik.update_display(q)
+            flange = ik.data.body("link6")
+            rotation = flange.xmat.reshape(3, 3)
+            pose = ik.pose(q)
+            np.testing.assert_allclose(pose[:3, 3], flange.xpos + rotation @ [0., 0., .009], atol=1e-12)
+            np.testing.assert_allclose(pose[:3, :3], rotation, atol=1e-12)
+
+    def test_changing_downstream_gripper_geometry_preserves_the_ee_frame(self):
+        original = CartesianIK(TEST_START).pose()
+        tree = ET.parse(Path(ee.__file__).parent / "models" / "rebot_rs.xml")
+        gripper = tree.find(".//body[@name='gripper_end']")
+        gripper.set("pos", "0.01 0.02 0.25")
+        gripper.set("quat", "1 0 0 0")
+        for name in ("gripper_left", "gripper_right"):
+            tree.find(f".//body[@name='{name}']").set("pos", "0.1 0.02 0.03")
+        with patch("rebot_kinematics.ET.parse", return_value=tree):
+            changed = CartesianIK(TEST_START).pose()
+        np.testing.assert_allclose(changed, original, atol=1e-12)
 
     def test_full_pose_is_solved_in_one_call_without_real_time_speed_limiting(self):
         ik = CartesianIK(TEST_START)
@@ -125,12 +148,13 @@ class KinematicsTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             ik.solve(transform, max_iters=0)
 
-    def test_tcp_offset_is_applied_in_tool_frame(self):
+    def test_tcp_offset_is_applied_in_mount_frame(self):
         original = CartesianIK(TEST_START)
         offset = np.array([.01, -.02, .03])
         moved = CartesianIK(TEST_START, tcp_offset=offset)
         base = original.pose()
         np.testing.assert_allclose(moved.pose()[:3, 3], base[:3, 3] + base[:3, :3] @ offset)
+        np.testing.assert_allclose(moved.pose()[:3, :3], base[:3, :3], atol=1e-12)
         target = ee.target_pose(original, None, [.01, .02, .03])
         np.testing.assert_allclose(target[:3, :3], base[:3, :3])
         np.testing.assert_allclose(target[:3, 3], base[:3, 3] + [.01, .02, .03])

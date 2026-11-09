@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Control one reBot RS TCP with Mink IK and the existing native MIT position loop."""
+"""Control one reBot RS gripper mounting frame with Mink IK and native MIT PD."""
 
 import argparse
 from contextlib import contextmanager, nullcontext
@@ -19,7 +19,7 @@ import yaml
 from rebot import CONFIG, load_config, resolve_channel, verify_identity
 from rebot_hand_guiding import SETTINGS_PATH, StopKey, load_settings
 from rebot_gravity import GravityModel
-from rebot_kinematics import CartesianIK, SIM_START, pose_matrix, vector6
+from rebot_kinematics import CartesianIK, EE_FRAME, SIM_START, pose_matrix, vector6
 from rebot_mit import MotorBus
 from rebot_motion import MOTION_KD, MOTION_KP
 from rebot_teleop import position_bounds, validate_pose
@@ -212,7 +212,8 @@ def control(*, hardware=False, side="right", config=CONFIG, settings_path=SETTIN
                     bus.command_position(raw, np.zeros(6), gravity(raw), MOTION_KP, MOTION_KD,
                                          time.monotonic() + cfg["max_feedback_age_s"])
                 mode = f"HARDWARE {side}" if hardware else "KINEMATIC SIMULATION"
-                print(f"EE {mode}; base-frame target; direct IK joint targets without host speed limiting. "
+                print(f"EE {mode}; reference {EE_FRAME}, TCP offset {tuple(tcp_offset)} m; "
+                      "base-frame target; direct IK joint targets without host speed limiting. "
                       "MIT desired velocity is zero; measured-pose gravity feedforward is enabled on hardware; "
                       "target self-collision checks enabled.", flush=True)
                 stop_help = ("Use the web STOP & hold button or terminal Ctrl-C to stop; "
@@ -238,12 +239,12 @@ def main(argv=None):
     parser.add_argument("--settings", type=Path, default=SETTINGS_PATH)
     target = parser.add_mutually_exclusive_group()
     target.add_argument("--pose", type=float, nargs=6, metavar=("X", "Y", "Z", "ROLL", "PITCH", "YAW"),
-                        help="Absolute TCP pose in the arm base frame: meters and degrees (extrinsic XYZ)")
+                        help="Absolute mount TCP pose in the arm base frame: meters and degrees (extrinsic XYZ)")
     target.add_argument("--offset", type=float, nargs=3, metavar=("DX", "DY", "DZ"),
                         help="Translation in base-frame meters from startup TCP; preserve startup orientation")
     parser.add_argument("--start-joints", type=float, nargs=6, help="Simulation initial J1-J6 in degrees")
     parser.add_argument("--tcp-offset", type=float, nargs=3, default=(0., 0., 0.),
-                        help="TCP position in gripper_end frame, in meters; default matches the model tcp site")
+                        help="TCP position in gripper_mount axes, in meters; default is the fixed mounting face center")
     parser.add_argument("--duration", type=float, help="Stop after this many seconds; required with --headless")
     parser.add_argument("--headless", action="store_true", help="No viewer; requires a fixed target and duration")
     parser.add_argument("--port", type=int, default=8080, help="Local web viewer port")
