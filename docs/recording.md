@@ -22,7 +22,7 @@ python rebot_collect.py \
   --camera right_wrist=/dev/video4
 ```
 
-`rebot_collect.py` 是独立采集入口，一条命令同时运行遥操作和采集，无需另开遥操作进程。它复用已有控制和写盘模块，固定使用双臂和双夹爪。`--dataset`、`--instruction`、`--camera` 为必填参数。
+`rebot_collect.py` 是独立采集入口，一条命令同时运行遥操作和采集，无需另开遥操作进程。它复用已有控制和写盘模块，固定使用双臂和双夹爪。只有 `--dataset` 必填；不传 `--camera` 时自动发现相机，使用 `camera_0`、`camera_1` 等占位名；不传 `--instruction` 时写入 `__pending__`，录制后再批量补充。也可用 `--camera 0 --camera 2` 只选设备、暂不命名。输出结构保持不变，占位数据应在训练前补全标注；自动编号按本次设备枚举顺序分配。
 
 `--camera` 至少指定一路，设备也可以写编号，如 `top=0`。同一物理相机在整个数据集中必须保持相同 ID；推荐使用稳定的 `/dev/v4l/by-id/...` 设备路径。ID 只允许小写 ASCII 字母、数字和下划线，ID 和设备路径均不可重复。采集模式要求双臂和双夹爪，不支持 `--side left/right` 或 `--no-gripper`。
 

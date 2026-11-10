@@ -474,9 +474,13 @@ def finalize_episode(directory, episode_id, cameras, instruction):
 
 def parse_cameras(values):
     cameras = {}
-    for value in values or []:
+    for index, value in enumerate(values or []):
         name, separator, source = value.partition("=")
-        if not separator or not source or name in cameras:
-            raise ValueError("Use unique --camera ID=DEVICE entries, for example top=/dev/video0.")
+        if not separator:
+            name, source = f"camera_{index}", value
+            if not source.isdecimal() and not Path(source).is_absolute():
+                raise ValueError("Use --camera DEVICE or --camera ID=DEVICE.")
+        if not source or name in cameras:
+            raise ValueError("Camera names and devices must be unique and nonempty.")
         cameras[identifier(name, "camera ID", r"[a-z0-9_]+")] = f"/dev/video{source}" if source.isdecimal() else source
     return cameras

@@ -2,6 +2,7 @@
 """Isolated GStreamer H.264 recorder; controlled with newline-delimited stdin JSON."""
 
 import argparse
+from contextlib import redirect_stdout
 import json
 from pathlib import Path
 import select
@@ -10,7 +11,7 @@ import struct
 import sys
 import time
 
-from webcam_viewer import choose_format
+from webcam_viewer import choose_format, discover_cameras
 
 
 def report(kind, **values):
@@ -191,17 +192,25 @@ class CameraRecorder:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--source", required=True)
-    parser.add_argument("--output", required=True, type=Path)
-    parser.add_argument("--timestamps", required=True, type=Path)
+    parser.add_argument("--discover", action="store_true", help="List capture devices without recording")
+    parser.add_argument("--source")
+    parser.add_argument("--output", type=Path)
+    parser.add_argument("--timestamps", type=Path)
     parser.add_argument("--test-source", action="store_true", help="Use a synthetic camera for offline tests")
     args = parser.parse_args()
+    if not args.discover and any(value is None for value in (args.source, args.output, args.timestamps)):
+        parser.error("recording requires --source, --output, and --timestamps")
     recorder = None
     try:
         import gi
         gi.require_version("Gst", "1.0")
         from gi.repository import Gst
         Gst.init(None)
+        if args.discover:
+            with redirect_stdout(sys.stderr):
+                sources = discover_cameras(Gst)
+            report("cameras", sources=sources)
+            return 0
         recorder = CameraRecorder(Gst, args.source, args.output, args.timestamps, test_source=args.test_source)
         recorder.run()
         return 0

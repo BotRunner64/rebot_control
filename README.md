@@ -102,6 +102,8 @@ python rebot_collect.py --dataset datasets/cup \
 
 按 Space、Esc、Q 或 Ctrl-C 停止遥操作并保持，随后完成视频核验和导出；看到 `Saved episode ...` 表示成功。下次运行向同一数据集追加新 episode。相机 ID 必须与物理设备稳定对应，所有流按原生时间戳独立记录、统一归零。数据坐标轴与末端控制坐标轴之间有固定变换；物理夹爪全开角度与控制行程分别配置。系统 GStreamer 依赖、完整参数、源坐标系及采样时刻定义、输出结构与失败数据处理见 [采集说明与 reBot 源契约](docs/recording.md)。原有 `rebot_teleop.py --dataset ...` 入口仍然可用；仅遥操作继续使用 `rebot_teleop.py`。
 
+先录制、之后批量标注时，可直接运行 `python rebot_collect.py --dataset datasets/cup`：自动发现相机并以 `camera_0`、`camera_1` 等命名，instruction 暂填 `__pending__`。也可用 `--camera 0 --camera 2` 指定设备但不命名。占位值在训练前补全，保存目录与原有格式保持一致。
+
 ### Star Arm 遥操实体 reBot
 
 `rebot_teleop.py` 将 Star Arm 的七路串口角度映射为实体 RS 的原生 MIT 位置、速度和 PD 指令；遥操不启用重力补偿，前馈力矩设为零，不启动 viewer。默认控制左右双臂及两只夹爪，也支持只连接单侧。运行即使能选中的电机，无需使能开关。

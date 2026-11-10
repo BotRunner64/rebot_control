@@ -2,6 +2,7 @@
 """Teleoperate both reBot arms and collect one contract-format dataset episode."""
 
 import argparse
+import json
 from pathlib import Path
 import subprocess
 import sys
@@ -9,7 +10,7 @@ import sys
 import can
 import yaml
 
-from rebot_recording import RecordingOptions, parse_cameras
+from rebot_recording import CAMERA_SCRIPT, RecordingOptions, parse_cameras
 from rebot_teleop import (CONFIG, LEADER_CONFIG, SETTINGS_PATH, GRIPPER_SETTINGS_PATH,
                           teleop)
 
@@ -17,9 +18,9 @@ from rebot_teleop import (CONFIG, LEADER_CONFIG, SETTINGS_PATH, GRIPPER_SETTINGS
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset", type=Path, required=True, help="Output dataset directory")
-    parser.add_argument("--instruction", required=True, help="Task instruction covering this episode")
-    parser.add_argument("--camera", action="append", required=True, metavar="ID=DEVICE",
-                        help="Named RGB camera; repeat for multiple cameras, e.g. top=/dev/video0")
+    parser.add_argument("--instruction", default="__pending__", help="Task instruction (default: __pending__)")
+    parser.add_argument("--camera", action="append", metavar="[ID=]DEVICE",
+                        help="Camera device with optional name (default: auto-detect all)")
     parser.add_argument("--episode-id", help="Unique episode name (default: generated UUID)")
     parser.add_argument("--config", type=Path, default=CONFIG, help="Follower bindings YAML")
     parser.add_argument("--leader-config", type=Path, default=LEADER_CONFIG)
@@ -32,7 +33,12 @@ def main(argv=None):
                         help="Physical fully-open angle used to normalize recorded openness")
     args = parser.parse_args(argv)
     try:
-        recording = RecordingOptions(args.dataset, args.instruction, parse_cameras(args.camera),
+        cameras = args.camera
+        if cameras is None:
+            result = subprocess.run(["/usr/bin/python3", str(CAMERA_SCRIPT), "--discover"],
+                                    capture_output=True, text=True, check=True, timeout=15.)
+            cameras = json.loads(result.stdout)["sources"]
+        recording = RecordingOptions(args.dataset, args.instruction, parse_cameras(cameras),
                                      args.episode_id, args.record_gripper_open_deg)
         recording.validate()
         teleop(config=args.config, leader_config=args.leader_config, settings_path=args.settings,
