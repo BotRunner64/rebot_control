@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
-"""Preview Linux webcams using GStreamer and automatic capture mode selection."""
+"""Preview Linux webcams in a browser using GStreamer and automatic capture modes."""
 
 import argparse
-import json
 import os
 from pathlib import Path
 import signal
 import sys
 import time
+import threading
 from types import SimpleNamespace
+import webbrowser
+
+from webcam_web import WebcamServer
 
 FIRST_FRAME_TIMEOUT = 10.0
 
@@ -17,7 +20,11 @@ def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cameras", nargs="+",
                         help="Camera indices or device paths (default: auto-detect).")
+    parser.add_argument("--port", type=int, default=8080, help="Starting loopback HTTP port (default: 8080)")
+    parser.add_argument("--no-browser", action="store_true", help="Print the viewer URL without opening it")
     args = parser.parse_args()
+    if not 1 <= args.port <= 65535:
+        parser.error("port must be between 1 and 65535")
     if args.cameras is not None:
         args.cameras = [f"/dev/video{source}" if source.isdecimal() else source
                         for source in args.cameras]
@@ -27,7 +34,7 @@ def parse_args():
 
 
 def load_runtime():
-    """Use the desktop's GStreamer bindings, including from a Conda shell."""
+    """Use system GStreamer bindings, including from a Conda shell."""
     try:
         import gi
         gi.require_version("Gst", "1.0")
@@ -36,7 +43,7 @@ def load_runtime():
     except (ImportError, ValueError) as exc:
         system_python = Path("/usr/bin/python3")
         if system_python.exists() and system_python.resolve() != Path(sys.executable).resolve():
-            print("Using system Python for desktop GStreamer bindings.", flush=True)
+            print("Using system Python for GStreamer bindings.", flush=True)
             os.execv(str(system_python), [str(system_python), str(Path(__file__).resolve()),
                                          *sys.argv[1:]])
         raise RuntimeError(
@@ -95,7 +102,7 @@ def choose_format(caps):
 
 
 class CameraPreview:
-    """Let GStreamer capture, decode and display the selected camera mode."""
+    """Capture JPEG previews into a bounded latest-frame slot for browser clients."""
 
     def __init__(self, source, runtime, loop):
         self.source = source
@@ -106,6 +113,13 @@ class CameraPreview:
         self.first_frame = False
         self.failed = False
         self.started_at = 0.0
+        self.mode = "Selecting capture mode"
+        self.error = None
+        self.closed = False
+        self.frame = None
+        self.sequence = 0
+        self.last_frame_at = 0.
+        self.condition = threading.Condition()
 
     def start(self):
         Gst = self.runtime.Gst
@@ -113,12 +127,13 @@ class CameraPreview:
         self.pipeline = Gst.parse_launch(
             "v4l2src name=camera ! capsfilter name=mode ! decodebin "
             "! videoconvert ! videoscale ! capsfilter name=preview_size "
-            "! taginject name=label ! autovideosink name=preview sync=false"
+            "! jpegenc quality=85 ! appsink name=preview emit-signals=true "
+            "max-buffers=1 drop=true sync=false"
         )
         camera = self.pipeline.get_by_name("camera")
         camera.set_property("device", self.source)
         if self.pipeline.set_state(Gst.State.READY) == Gst.StateChangeReturn.FAILURE:
-            raise RuntimeError("Could not open camera or desktop video output.")
+            raise RuntimeError("Could not open camera.")
         caps = camera.get_static_pad("src").query_caps(None)
         selected = choose_format(caps)
         self.pipeline.get_by_name("mode").set_property("caps", selected)
@@ -126,8 +141,8 @@ class CameraPreview:
         _, width = info.get_int("width")
         _, height = info.get_int("height")
         _, numerator, denominator = info.get_fraction("framerate")
-        label = f"{width}x{height}, {numerator / denominator:g} FPS"
-        print(f"Camera {self.source}: selected {label}, {info.get_name()}.", flush=True)
+        self.mode = f"{width} x {height} / {numerator / denominator:g} FPS"
+        print(f"Camera {self.source}: selected {self.mode}, {info.get_name()}.", flush=True)
 
         # Scale only the displayed image; capture retains the full selected frame.
         scale = min(640 / width, 480 / height, 1)
@@ -137,45 +152,56 @@ class CameraPreview:
             "caps", Gst.Caps.from_string(f"video/x-raw,width={preview_width},"
                                          f"height={preview_height},pixel-aspect-ratio=1/1")
         )
-        title = json.dumps(f"Camera {self.source} - {label}")
-        self.pipeline.get_by_name("label").set_property("tags", f"title={title}")
-        sink_pad = self.pipeline.get_by_name("preview").get_static_pad("sink")
-        sink_pad.add_probe(Gst.PadProbeType.BUFFER, self.on_first_frame)
-        sink_pad.add_probe(Gst.PadProbeType.EVENT_UPSTREAM, self.on_navigation)
+        self.pipeline.get_by_name("preview").connect("new-sample", self.on_sample)
         self.bus = self.pipeline.get_bus()
         self.bus.add_signal_watch()
         self.bus.connect("message::error", self.on_error)
-        self.bus.connect("message::eos", lambda *args: self.loop.quit())
+        self.bus.connect("message::eos", lambda *args: self.fail("Camera stream ended."))
         self.started_at = time.monotonic()
         if self.pipeline.set_state(Gst.State.PLAYING) == Gst.StateChangeReturn.FAILURE:
             raise RuntimeError("Could not start camera stream.")
 
-    def on_first_frame(self, pad, info):
-        self.first_frame = True
-        print(f"Camera {self.source}: first frame received.", flush=True)
-        return self.runtime.Gst.PadProbeReturn.REMOVE
+    def on_sample(self, sink):
+        sample = sink.emit("pull-sample")
+        if sample is None:
+            return self.runtime.Gst.FlowReturn.EOS
+        buffer = sample.get_buffer()
+        frame = buffer.extract_dup(0, buffer.get_size())
+        with self.condition:
+            if not self.first_frame:
+                print(f"Camera {self.source}: first frame received.", flush=True)
+            self.first_frame = True
+            self.last_frame_at = time.monotonic()
+            self.frame = frame
+            self.sequence += 1
+            self.condition.notify_all()
+        return self.runtime.Gst.FlowReturn.OK
 
-    def on_navigation(self, pad, info):
-        event = info.get_event()
-        if event.type == self.runtime.Gst.EventType.NAVIGATION:
-            details = event.get_structure()
-            if details.get_string("event") == "key-press":
-                key = details.get_string("key") or ""
-                if key.lower() in ("q", "escape"):
-                    self.loop.quit()
-        return self.runtime.Gst.PadProbeReturn.OK
+    def wait_frame(self, sequence, timeout=1.):
+        with self.condition:
+            self.condition.wait_for(
+                lambda: self.sequence != sequence or self.failed or self.closed, timeout)
+            if self.failed or self.closed or self.sequence == sequence:
+                return None
+            return self.sequence, self.frame
+
+    def snapshot(self):
+        with self.condition:
+            state = "error" if self.failed else "stopped" if self.closed else "live" if self.first_frame else "waiting"
+            return {"source": self.source, "mode": self.mode, "state": state, "error": self.error}
 
     def on_error(self, bus, message):
         error, _ = message.parse_error()
-        if "window was closed" in error.message.lower():
-            self.loop.quit()
-        else:
-            self.fail(error.message)
+        self.fail(error.message)
 
     def fail(self, message):
-        if self.failed:
-            return
-        self.failed = True
+        with self.condition:
+            if self.failed:
+                return
+            self.failed = True
+            self.error = message
+            self.frame = None
+            self.condition.notify_all()
         print(f"Camera {self.source}: {message}", file=sys.stderr, flush=True)
         if self.pipeline is not None:
             self.pipeline.set_state(self.runtime.Gst.State.NULL)
@@ -183,18 +209,25 @@ class CameraPreview:
     def check_timeout(self):
         if not self.failed and not self.first_frame and time.monotonic() - self.started_at >= FIRST_FRAME_TIMEOUT:
             self.fail("No first frame within 10 seconds.")
+        elif not self.failed and self.first_frame and time.monotonic() - self.last_frame_at >= FIRST_FRAME_TIMEOUT:
+            self.fail("No camera frame for 10 seconds.")
 
     def close(self):
+        with self.condition:
+            self.closed = True
+            self.frame = None
+            self.condition.notify_all()
         if self.bus is not None:
             self.bus.remove_signal_watch()
         if self.pipeline is not None:
             self.pipeline.set_state(self.runtime.Gst.State.NULL)
 
 
-def display(sources, runtime):
+def display(sources, runtime, *, port=8080, open_browser=True):
     loop = runtime.GLib.MainLoop()
     previews = []
     callbacks = []
+    server = None
     try:
         for source in sources:
             preview = CameraPreview(source, runtime, loop)
@@ -205,6 +238,14 @@ def display(sources, runtime):
                 preview.fail(str(exc))
         if all(preview.failed for preview in previews):
             return 1
+
+        server = WebcamServer(previews, lambda: runtime.GLib.idle_add(loop.quit), port=port)
+        print(f"Webcam web viewer: {server.url}", flush=True)
+        if open_browser:
+            try:
+                webbrowser.open(server.url)
+            except Exception as exc:
+                print(f"Could not open a browser: {exc}. Open {server.url} manually.", file=sys.stderr)
 
         def check_cameras():
             for preview in previews:
@@ -220,7 +261,9 @@ def display(sources, runtime):
         callbacks.append(runtime.GLib.timeout_add(100, check_cameras))
         callbacks.append(runtime.GLib.unix_signal_add(runtime.GLib.PRIORITY_DEFAULT,
                                                      signal.SIGINT, interrupt))
-        print("Press Q or Esc, close a camera window, or press Ctrl-C to exit.", flush=True)
+        callbacks.append(runtime.GLib.unix_signal_add(runtime.GLib.PRIORITY_DEFAULT,
+                                                     signal.SIGTERM, interrupt))
+        print("Use Close viewer, Q or Esc in the web page, or Ctrl-C in the terminal to exit.", flush=True)
         loop.run()
         return 1 if all(preview.failed for preview in previews) else 0
     finally:
@@ -228,6 +271,8 @@ def display(sources, runtime):
             runtime.GLib.source_remove(callback)
         for preview in previews:
             preview.close()
+        if server is not None:
+            server.close()
 
 
 def main():
@@ -238,7 +283,7 @@ def main():
         sources = args.cameras if args.cameras is not None else discover_cameras(runtime.Gst)
         if not sources:
             raise RuntimeError("No video capture devices found; specify devices with --cameras.")
-        return display(sources, runtime)
+        return display(sources, runtime, port=args.port, open_browser=not args.no_browser)
     except KeyboardInterrupt:
         return 130
     except Exception as exc:

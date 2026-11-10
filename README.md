@@ -355,25 +355,30 @@ python rebot_identify.py --side right
 
 ### 多路 Webcam 预览
 
-运行 `webcam_viewer.py`，GStreamer 自动发现摄像头、查询支持的采集模式，并为每路设备打开独立预览窗口：
+运行 `webcam_viewer.py`，GStreamer 自动发现摄像头、查询支持的采集模式，并在同一个 Web 页面显示多路预览；已移除原生桌面预览窗口：
 
 ```bash
 python webcam_viewer.py                                    # 自动识别设备并选择采集模式
 python webcam_viewer.py --cameras 0 2                       # 指定摄像头编号
 python webcam_viewer.py --cameras /dev/video0 /dev/video2
+python webcam_viewer.py --no-browser --port 8090           # 手动打开终端打印的地址
 ```
 
-程序面向 Linux 桌面环境，使用系统 GStreamer 和 PyGObject；Ubuntu 可安装：
+程序面向 Linux，使用系统 GStreamer 和 PyGObject；浏览器负责显示，不依赖桌面视频输出。Ubuntu 可安装：
 
 ```bash
-sudo apt install python3-gi gir1.2-gstreamer-1.0 gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-x
+sudo apt install python3-gi gir1.2-gstreamer-1.0 gstreamer1.0-plugins-base gstreamer1.0-plugins-good
 ```
 
-Conda 等 Python 环境若缺少系统 GStreamer 绑定，程序会自动切换到 `/usr/bin/python3` 执行；也可直接使用 `/usr/bin/python3 webcam_viewer.py`。预览不依赖 OpenCV、Pillow 或 Tkinter。
+Conda 等 Python 环境若缺少系统 GStreamer 绑定，程序会自动切换到 `/usr/bin/python3` 执行；也可直接使用 `/usr/bin/python3 webcam_viewer.py`。Web 服务使用 Python 标准库，不需额外安装前端或 Web 框架依赖；预览不依赖 OpenCV、Pillow 或 Tkinter。
 
 采集模式使用 Cheese 的自动选择规则：从设备公布的模式中，优先选宽度 ≥640 像素且帧率 ≥15 FPS 的最高分辨率；没有符合条件的模式时选择最高分辨率。同一分辨率优先选择最高帧率。程序不维护已保存的分辨率偏好，不提供手动设置分辨率、帧率、格式或缓冲大小的命令行参数，也不写死某个摄像头的采集分辨率。本机两路 LRCP USB3.0 自动选到 MJPEG 2592×1944 / 23 FPS，该模式已通过双路取帧验证，可保留完整鱼眼视野。
 
-GStreamer 负责采集、解码和显示；预览画面等比例缩小到约 640×480 后显示，窗口可调整大小，缩放不会改变采集视野。窗口标题和启动日志显示设备与选定模式，实际收到第一帧后打印 `first frame received`。按 `Q`、`Esc`、关闭任意预览窗口或按 `Ctrl-C` 退出并释放设备。某一路失败时报告错误，其他设备继续预览；启动后 10 秒仍无首帧时报告超时，所有设备失败时程序退出。多路画面不保证硬件同步。
+GStreamer 负责采集、解码、等比例缩小和 JPEG 编码，预览画面约 640×480，通过本机 MJPEG 流送入浏览器，不裁剪视野。默认自动打开 `http://127.0.0.1:8080`，端口占用时顺延；仅监听本机回环地址。浏览器客户端共用每路相机的最新一帧，刷新或打开多个标签页不会重复打开设备，慢客户端不会累积旧画面。原始采集模式和数采脚本使用的 `choose_format` 逻辑保持一致，预览本身不保存视频。
+
+页面参考 [Apple 的设计原则](https://developer.apple.com/design/human-interface-guidelines/design-principles/)，让画面占据主要空间，使用清楚的层级、文字状态反馈和一致的操作位置，支持自适应网格、单路放大、键盘操作与系统亮色/深色外观。每张相机卡片显示设备路径、选定模式和实时状态，第一帧到达后终端打印 `first frame received`。点击 `Expand view` 聚焦一路，点击 `All cameras` 或按 `Esc` 返回网格。
+
+点击页面 `Close viewer`、在网格页按 `Q`/`Esc`，或在终端按 `Ctrl-C`，退出并释放所有设备。单纯关闭标签页不会停止服务，允许重新打开或刷新页面。某一路失败时显示原因，其他设备继续预览；首帧或后续画面连续 10 秒未到达时报告超时，所有设备失败时程序退出。浏览器与服务断线时遮住旧画面并提示重连。多路画面不保证硬件同步。测试使用合成视频检查 JPEG/HTTP 流、页面资源、退出请求、清理与端口占用；实际设备的帧率和延迟仍需实测。
 
 ### Star Arm 遥操作
 
