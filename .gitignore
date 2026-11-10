@@ -4,3 +4,4 @@ stararm.local.yaml
 rebot.local.yaml
 calibration_runs/
 motion_runs/
+trajectory_runs/

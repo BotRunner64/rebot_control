@@ -53,11 +53,6 @@ legend span { color: #73767c; font-size: 10px; font-weight: 400; align-self: cen
 input { display: block; width: 100%; margin-top: 5px; padding: 9px 7px; border: 1px solid #dcdee3; border-radius: 7px; font: inherit; font-size: 13px; color: #242629; background: #fff; font-variant-numeric: tabular-nums; }
 .full { width: 100%; }
 .detail { color: #73767c; font-size: 11px; margin: 0 0 14px; line-height: 1.5; }
-dialog { width: 360px; max-width: calc(100% - 40px); border: 1px solid #e1e2e6; border-radius: 18px; padding: 26px; color: #242629; box-shadow: 0 16px 64px #00000020; }
-dialog::backdrop { background: #20232c40; }
-dialog p { color: #65686e; font-size: 13px; line-height: 1.6; margin: 12px 0 24px; }
-dialog form { display: flex; justify-content: flex-end; gap: 8px; }
-dialog button { background: #f0f0f3; }
 @media (max-width: 600px) {
   .topbar { padding: 20px 16px; gap: 8px; }
   .identity h1 { font-size: 20px; gap: 8px; }

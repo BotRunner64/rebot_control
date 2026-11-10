@@ -61,14 +61,11 @@ def target_pose(ik, pose, offset):
 
 
 def track(ik, target, stop, keys, cfg, *, duration=None, viewer=None, bus=None,
-          reference=None, initial_goal=False, gravity=None):
+          reference=None, gravity=None):
     """Publish targets at 50 Hz; an independent worker continuously services CAN."""
     timing = LoopTiming("ee-target", 50)
     started = time.monotonic()
     actual = ik.q
-    previously_enabled = None
-    hold_q = actual.copy()
-    pending_goal = target.copy() if initial_goal else None
     motor = (MotorWorker(bus, reference, ik.lower, ik.upper, cfg, stop, gravity)
              if bus is not None else None)
     try:
@@ -86,29 +83,15 @@ def track(ik, target, stop, keys, cfg, *, duration=None, viewer=None, bus=None,
                     break
                 if motor is not None:
                     actual = motor.read()
-                enabled = viewer is None or viewer.is_enabled()
-                if enabled != previously_enabled:
-                    hold_q = actual.copy()
-                    if previously_enabled is False and enabled:
-                        target = ik.pose(actual) if pending_goal is None else pending_goal
-                        pending_goal = None
-                        viewer.set_target(target)
-                    previously_enabled = enabled
                 if viewer is not None:
                     if viewer.consume_hold():
                         target = ik.pose(actual)
                         viewer.set_target(target)
-                        hold_q = actual.copy()
-                        pending_goal = None
-                    elif enabled:
+                    else:
                         target = viewer.read_target()
-                blocked = False
-                if enabled:
-                    next_q = ik.solve(target, init_q=actual, stop=stop)
-                    next_q = np.clip(next_q, ik.lower, ik.upper)
-                    blocked = ik.has_self_collision(next_q)
-                else:
-                    next_q = hold_q
+                next_q = ik.solve(target, init_q=actual, stop=stop)
+                next_q = np.clip(next_q, ik.lower, ik.upper)
+                blocked = ik.has_self_collision(next_q)
                 if stop.is_set():
                     break
                 if motor is not None:
@@ -224,11 +207,10 @@ def control(*, hardware=False, side="right", config=CONFIG, settings_path=SETTIN
                       "Hardware exit attempts position hold and leaves motors enabled; gripper is unchanged.",
                       flush=True)
                 if viewer is not None:
-                    print("Start control to drag the target. T: move; R: rotate; "
+                    print("Drag the target to control the end effector. T: move; R: rotate; "
                           "F: fit view; Esc: cancel drag. Browser reconnect preserves control.", flush=True)
                 return track(ik, target, stop, keys, cfg, duration=duration, viewer=viewer, bus=bus,
-                             reference=reference, gravity=gravity,
-                             initial_goal=pose is not None or offset is not None)
+                             reference=reference, gravity=gravity)
 
 
 def main(argv=None):

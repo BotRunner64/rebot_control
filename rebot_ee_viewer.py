@@ -54,7 +54,6 @@ class WebViewer:
         self.control_lock = threading.RLock()
         self.clients = set()
         self.acknowledged = {}
-        self.enabled = False
         self.blocked = False
         self.target_version, self.target_source, self.target_seq = 0, "server", 0
         self.camera_version = 0
@@ -87,13 +86,7 @@ class WebViewer:
             if action == "ready":
                 self.clients.add(client)
                 self.ready.set()
-            elif action == "enable":
-                if message.get("aligned") is not True:
-                    raise ValueError("Confirm model alignment before enabling control.")
-                self.enabled = True
             elif action == "pose":
-                if not self.enabled:
-                    raise ValueError("Start control before changing the target.")
                 position = np.asarray(message["position"], dtype=float)
                 quaternion = np.asarray(message["quaternion"], dtype=float)
                 if (position.shape != (3,) or quaternion.shape != (4,)
@@ -124,10 +117,6 @@ class WebViewer:
         with self.control_lock:
             self._set_target(validate_transform(target), "server", 0)
 
-    def is_enabled(self):
-        with self.control_lock:
-            return self.enabled
-
     def fit_camera(self):
         points = np.vstack([self.ik.data.geom_xpos[index] for index in self.mesh_ids]
                            + [self.ik.pose(self.ik.data.qpos)[:3, 3], np.zeros(3)])
@@ -154,7 +143,7 @@ class WebViewer:
         with self.control_lock:
             return {"type": "state", **self._state, "target": pose_packet(self.commands.read_target()),
                     "target_version": self.target_version, "target_source": self.target_source,
-                    "target_seq": self.target_seq, "enabled": self.enabled,
+                    "target_seq": self.target_seq,
                     "ack_seq": self.acknowledged.get(client, 0),
                     "camera": self.camera, "camera_version": self.camera_version,
                     "stopped": self.stop.is_set()}

@@ -81,7 +81,7 @@ function send(message) {
   socket.send(JSON.stringify(message));
   return true;
 }
-function isIK() { return connected && state?.enabled && !state.stopped; }
+function isIK() { return !readOnly && connected && state && !state.stopped; }
 function updateFields() {
   const euler = new THREE.Euler().setFromQuaternion(target.quaternion, 'ZYX');
   const values = [...target.position.toArray().map((x) => x * 1000), ...[euler.x, euler.y, euler.z].map(deg)];
@@ -139,7 +139,7 @@ function fit() {
 }
 $('fit').onclick = fit;
 window.addEventListener('keydown', (event) => {
-  if (event.key === 'Escape' && !$('confirm-control').open) {
+  if (event.key === 'Escape') {
     if (dragging) { controls.reset(); queuePose(); flushPose(); }
     else closePose();
     event.preventDefault();
@@ -186,14 +186,6 @@ $('edit-pose').onclick = () => {
   if (open) { updateFields(); fields[0].focus(); }
 };
 $('close-pose').onclick = () => { closePose(); $('edit-pose').focus(); };
-function startControl() { send({ type: 'enable', aligned: true }); }
-$('enable').onclick = () => {
-  if (hardware) $('confirm-control').showModal();
-  else startControl();
-};
-$('confirm-control').addEventListener('close', () => {
-  if ($('confirm-control').returnValue === 'start' && connected && !state?.stopped) startControl();
-});
 $('hold').onclick = () => {
   pendingPose = false;
   closePose();
@@ -229,7 +221,6 @@ function updateState(message) {
   if (message.camera_version !== cameraVersion) { cameraVersion = message.camera_version; fit(); }
   renderer.domElement.hidden = false;
   const alive = connected && !message.stopped;
-  if (message.stopped && $('confirm-control').open) $('confirm-control').close('cancel');
   $('stop').disabled = !alive;
   if (readOnly) {
     $('control-status').textContent = message.stopped ? 'Viewer closed' : 'Live preview';
@@ -239,17 +230,14 @@ function updateState(message) {
   }
   const ik = isIK();
   controls.enabled = helper.visible = ik;
-  $('enable').disabled = !alive;
-  $('enable').hidden = message.enabled;
-  $('active-tools').hidden = !message.enabled;
   ['translate', 'rotate', 'edit-pose', 'hold', 'apply-pose'].forEach((id) => { $(id).disabled = !ik; });
   fields.forEach((input) => { input.disabled = !ik; });
   const reached = message.position_error_mm <= 2 && message.orientation_error_deg <= 2;
-  const status = message.stopped ? 'Stopped' : !message.enabled ? 'Holding position' : message.blocked ? 'Target blocked' : reached ? 'Ready' : 'Moving to target';
+  const status = message.stopped ? 'Stopped' : message.blocked ? 'Target blocked' : reached ? 'Ready' : 'Moving to target';
   $('control-status').textContent = status;
   document.body.dataset.status = !alive ? 'idle' : message.blocked ? 'blocked' : 'live';
   $('pose-error').textContent = `Target error: ${message.position_error_mm.toFixed(2)} mm · ${message.orientation_error_deg.toFixed(2)}°`;
-  $('hint').textContent = message.stopped ? 'Restart the Python command to control again.' : !message.enabled ? 'Start control to move the end effector.' : controls.mode === 'rotate' ? 'Drag a ring to rotate · Shift for 1° steps' : 'Drag a handle to move · Shift for 1 mm steps';
+  $('hint').textContent = message.stopped ? 'Restart the Python command to control again.' : controls.mode === 'rotate' ? 'Drag a ring to rotate · Shift for 1° steps' : 'Drag a handle to move · Shift for 1 mm steps';
   showNotice(commandError || (message.blocked ? 'Move the target away from the arm to avoid self-collision.' : ''), Boolean(commandError));
 }
 function connect() {
@@ -272,7 +260,6 @@ function connect() {
     showNotice(state?.stopped ? 'Restart the Python command to open the viewer again.' : readOnly ? 'Connection lost. Reconnecting…' : 'Connection lost. The arm keeps its last command. Reconnecting…');
     document.querySelectorAll('#control-bar button, #pose-form input, #pose-form button, #stop').forEach((element) => { element.disabled = true; });
     closePose();
-    if ($('confirm-control').open) $('confirm-control').close('cancel');
     if (!state?.stopped) setTimeout(connect, 1000);
   };
   socket.onerror = () => { $('control-status').textContent = 'Connection unavailable'; };

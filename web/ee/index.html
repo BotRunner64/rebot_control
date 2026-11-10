@@ -35,8 +35,7 @@
     </section>
     <footer>
       <div id="control-bar" class="surface" aria-label="End-effector tools" hidden>
-        <button id="enable" class="primary" disabled>Start control</button>
-        <div id="active-tools" hidden>
+        <div id="active-tools">
           <div class="segmented" role="group" aria-label="Transform tool"><button id="translate" aria-pressed="true" title="Move (T)">Move</button><button id="rotate" aria-pressed="false" title="Rotate (R)">Rotate</button></div>
           <button id="edit-pose" aria-expanded="false" aria-controls="pose-panel">Set pose</button>
           <span class="separator" aria-hidden="true"></span>
@@ -46,11 +45,6 @@
       <p id="hint">Drag to orbit · Scroll to zoom</p>
     </footer>
   </main>
-  <dialog id="confirm-control" aria-labelledby="confirm-title" aria-describedby="confirm-description">
-    <h2 id="confirm-title">Start robot control?</h2>
-    <p id="confirm-description">Confirm the model matches the physical arm. Moving the target will move the robot.</p>
-    <form method="dialog"><button value="cancel" autofocus>Cancel</button><button value="start" class="primary">Model matches — start</button></form>
-  </dialog>
   <script type="module" src="/viewer.js"></script>
 </body>
 </html>

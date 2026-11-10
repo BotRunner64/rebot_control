@@ -81,14 +81,10 @@ class ViewerTests(unittest.TestCase):
     def send(self, action, **values):
         self.viewer.receive({"type": action, **values}, "browser-1")
 
-    def enable_ik(self):
-        self.send("enable", aligned=True)
-
     def pose(self, target, seq=1):
         self.send("pose", **pose_packet(target), seq=seq)
 
     def test_pose_protocol_preserves_full_transform_and_acknowledges_latest_sequence(self):
-        self.enable_ik()
         target = pose_matrix([.31, .08, .65, 10, 20, 30])
         self.pose(target, seq=15)
         np.testing.assert_allclose(self.viewer.read_target(), target, atol=1e-12)
@@ -103,23 +99,18 @@ class ViewerTests(unittest.TestCase):
         self.assertEqual(packet["ack_seq"], 15)
         np.testing.assert_allclose(packet["target"]["position"], self.ik.pose()[:3, 3])
 
-    def test_alignment_gate_and_malformed_commands_do_not_change_the_target(self):
+    def test_malformed_and_removed_commands_do_not_change_the_target(self):
         initial = self.viewer.read_target()
-        with self.assertRaises(ValueError):
-            self.send("enable")
-        with self.assertRaises(ValueError):
-            self.pose(initial)
-        self.enable_ik()
         for message in ({"type": "pose", "position": [1, 2, 3], "quaternion": [0, 0, 0, 0], "seq": 1},
                         {"type": "pose", "position": [float("nan"), 2, 3], "quaternion": [0, 0, 0, 1], "seq": 2},
                         {"type": "pose", **pose_packet(initial), "seq": -1},
                         {"type": "mode", "mode": "invalid"},
                         {"type": "gains", "kp": [50.] * 6, "kd": [6.] * 6},
-                        {"type": "joints", "values": [1.] * 6}):
+                        {"type": "joints", "values": [1.] * 6},
+                        {"type": "enable", "aligned": True}):
             with self.subTest(message=message), self.assertRaises(ValueError):
                 self.viewer.receive(message, "browser-1")
         np.testing.assert_allclose(self.viewer.read_target(), initial)
-        self.assertTrue(self.viewer.is_enabled())
 
     def test_hold_and_stop_are_distinct_and_report_the_stop_client(self):
         self.send("hold")
@@ -131,21 +122,18 @@ class ViewerTests(unittest.TestCase):
         self.assertFalse(self.viewer.is_running())
         self.assertIn("web STOP & hold button (client browser-1)", output.getvalue())
 
-    def test_read_only_gate_holds_position_and_rejects_removed_settings(self):
+    def test_default_target_holds_position_without_start_command(self):
         target = self.ik.pose()
-        target[0, 3] += .05
-        self.viewer.set_target(target)
         with redirect_stdout(io.StringIO()):
             result = ee.track(self.ik, target, self.stop, SimpleNamespace(pressed=lambda: False),
                               ee.load_settings(), duration=.025, viewer=self.viewer)
-        self.assertFalse(result.reached)
-        np.testing.assert_array_equal(self.ik.data.qpos, SIM_START)
+        self.assertTrue(result.reached)
+        np.testing.assert_allclose(self.ik.data.qpos, SIM_START, atol=1e-6)
         for action in ("gains", "joints", "mode", "align"):
             with self.subTest(action=action), self.assertRaises(ValueError):
                 self.send(action)
-        self.assertFalse(self.viewer.is_enabled())
 
-    def test_simple_enable_and_pose_keep_native_mit_gains(self):
+    def test_direct_pose_control_keeps_native_mit_gains(self):
         hardware = hardware_tests.HardwareTests()
         hardware.setUp()
         target_offset = np.array([.003, 0., 0.])
@@ -161,8 +149,6 @@ class ViewerTests(unittest.TestCase):
                 sync()
                 calls += 1
                 if calls == 2:
-                    viewer.receive({"type": "enable", "aligned": True}, "test")
-                elif calls == 3:
                     target = ik.pose(ik.data.qpos)
                     target[:3, 3] += target_offset
                     viewer.receive({"type": "pose", **pose_packet(target), "seq": 1}, "test")
@@ -179,18 +165,24 @@ class ViewerTests(unittest.TestCase):
             self.assertGreater(np.linalg.norm(command[2]), 1.)
         hardware.assert_closed_and_holding()
 
-    def test_disconnect_and_bad_packets_do_not_stop_or_enable_the_controller(self):
+    def test_disconnect_and_bad_packets_preserve_target_and_do_not_stop_control(self):
         server = ViewerServer.__new__(ViewerServer)
         server.viewer = self.viewer
+        target = self.ik.pose()
+        target[0, 3] += .003
+        self.pose(target)
         socket = Socket([json.dumps({"type": "ready"}), "not-json", json.dumps({"type": "enable"})])
         asyncio.run(server._connection(socket))
         self.assertTrue(self.viewer.ready.is_set())
         self.assertFalse(self.viewer.clients)
         self.assertFalse(self.stop.is_set())
-        self.assertFalse(self.viewer.enabled)
+        np.testing.assert_allclose(self.viewer.read_target(), target, atol=1e-12)
         self.assertEqual(sum(packet["type"] == "error" for packet in socket.sent), 2)
         self.send("ready")
         self.assertTrue(self.viewer.wait_for_client())
+        target[1, 3] += .003
+        self.pose(target, seq=2)
+        np.testing.assert_allclose(self.viewer.read_target(), target, atol=1e-12)
 
     def test_http_assets_model_and_path_traversal(self):
         server = ViewerServer.__new__(ViewerServer)
@@ -234,7 +226,6 @@ class ViewerTests(unittest.TestCase):
         self.assertIn("EE stop reason: received SIGINT", output.getvalue())
 
     def test_unreachable_pose_packets_do_not_stop_the_web_loop(self):
-        self.enable_ik()
         target = self.ik.pose()
         target[:3, 3] += [.5, .2, .2]
         target[:3, :3] = Rotation.from_euler("xyz", [20, 10, 30], degrees=True).as_matrix()
@@ -287,27 +278,20 @@ class ViewerTests(unittest.TestCase):
             np.testing.assert_allclose(command[0], hardware.reference + hardware_tests.TEST_START, atol=.0004)
         hardware.assert_closed_and_holding()
 
-    def test_hold_discards_pending_startup_goal_before_control_is_started(self):
+    def test_startup_goal_runs_without_start_command(self):
         hardware = hardware_tests.HardwareTests()
         hardware.setUp()
 
         def connected_viewer(ik, stop, **kwargs):
             viewer = WebViewer(ik, stop, open_browser=False, server_factory=MemoryServer)
             viewer.receive({"type": "ready"}, "test")
-            viewer.receive({"type": "hold"}, "test")
-            sync = viewer.sync
-
-            def advance():
-                sync()
-                viewer.receive({"type": "enable", "aligned": True}, "test")
-            viewer.sync = advance
             return viewer
 
         with patch("rebot_ee_viewer.WebViewer", side_effect=connected_viewer):
-            result = hardware.run_control(headless=False, offset=[.1, 0., 0.])
+            result = hardware.run_control(headless=False, offset=[.003, 0., 0.])
         self.assertTrue(result.reached)
-        for command in hardware.commands:
-            np.testing.assert_allclose(command[0], hardware.reference + hardware_tests.TEST_START, atol=.0004)
+        self.assertTrue(any(np.max(np.abs(command[0] - hardware.commands[0][0])) > .002
+                            for command in hardware.commands))
         hardware.assert_closed_and_holding()
 
 
