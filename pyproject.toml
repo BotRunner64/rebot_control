@@ -21,6 +21,7 @@ dependencies = [
 
 [project.optional-dependencies]
 ee = ["mink>=1.4.0,<2", "quadprog>=0.1.13"]
+recording = ["pyarrow>=17"]
 
 [tool.uv]
 package = false

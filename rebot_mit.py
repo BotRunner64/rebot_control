@@ -135,6 +135,7 @@ class MotorBus:
                 self.feedback[motor] = {
                     "timestamp": frame.timestamp,
                     "received_at": time.monotonic(),
+                    "received_at_ns": time.monotonic_ns(),
                     "position": position / 65535 * 2 * limits.position - limits.position,
                     "velocity": velocity / 65535 * 2 * limits.velocity - limits.velocity,
                     "torque": torque / 65535 * 2 * limits.torque - limits.torque,

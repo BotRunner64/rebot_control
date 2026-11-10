@@ -88,6 +88,20 @@ python rebot_mirror.py --no-browser --port 8080
 
 默认请求 30 Hz，每次顺序读取左、右臂各七路角度，不保证硬件同步；实际刷新率取决于 CAN 反馈速度。仅在两臂反馈均完整时更新姿态，任一侧读取失败则冻结两只模型并报告失败侧，短暂缺帧会重试；连续失败至少三次且距上次完整反馈已超过两秒时退出。收到电机故障报告则立即退出，不等待重试。
 
+### 遥操作数据采集
+
+独立入口 `rebot_collect.py` 同时启动遥操作与数据采集，采集从臂的实际 EEF 位姿、实际夹爪开合和带逐帧时间索引的 H.264 视频，按 LOOM 目标格式保存。一次运行生成一个 episode，要求双臂、双夹爪和至少一路相机：
+
+```bash
+conda activate rebot_control
+python -m pip install 'pyarrow>=17'
+python rebot_collect.py --dataset datasets/cup \
+  --instruction 'pick up the cup' \
+  --camera top=/dev/video0 --camera left_wrist=/dev/video2
+```
+
+按 Space、Esc、Q 或 Ctrl-C 停止遥操作并保持，随后完成视频核验和导出；看到 `Saved episode ...` 表示成功。下次运行向同一数据集追加新 episode。相机 ID 必须与物理设备稳定对应，所有流按原生时间戳独立记录、统一归零。数据坐标轴与末端控制坐标轴之间有固定变换；物理夹爪全开角度与控制行程分别配置。系统 GStreamer 依赖、完整参数、源坐标系及采样时刻定义、输出结构与失败数据处理见 [采集说明与 reBot 源契约](docs/recording.md)。原有 `rebot_teleop.py --dataset ...` 入口仍然可用；仅遥操作继续使用 `rebot_teleop.py`。
+
 ### Star Arm 遥操实体 reBot
 
 `rebot_teleop.py` 将 Star Arm 的七路串口角度映射为实体 RS 的原生 MIT 位置、速度和 PD 指令；遥操不启用重力补偿，前馈力矩设为零，不启动 viewer。默认控制左右双臂及两只夹爪，也支持只连接单侧。运行即使能选中的电机，无需使能开关。

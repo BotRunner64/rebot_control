@@ -214,7 +214,11 @@ def target_worker(sides, leaders, arms, count, gripper_open_deg, sources, target
 
 
 def motor_worker(name, index, arm, channel, count, gripper_open_deg, targets, phases,
-                 ready, prepared, enabled, stop, heartbeat, reports, cfg, bus_factory):
+                 ready, prepared, enabled, stop, heartbeat, reports, cfg, bus_factory,
+                 recording_samples=None):
+    if recording_samples is not None:
+        from rebot_recording import publish_feedback
+
     reference, low, high = position_bounds(arm, count, gripper_open_deg)
     kp, kd = np.append(MOTION_KP, 50.)[:count], np.append(MOTION_KD, 4.)[:count]
     gripper = None
@@ -288,6 +292,9 @@ def motor_worker(name, index, arm, channel, count, gripper_open_deg, targets, ph
                 # Each MIT command already returns position; avoid seven extra queries.
                 raw = validate_pose(bus.feedback_positions(math.inf), reference, low, high)
                 bus.set_hold(raw, zero, kp, kd)
+                if recording_samples is not None:
+                    publish_feedback(recording_samples, name.removeprefix("motor-"),
+                                     bus.feedback_states(math.inf))
                 timing.complete(began, source_at)
                 timing.pace(stop)
         finally:
@@ -304,10 +311,11 @@ def worker_entry(name, worker, args, stop, reports):
         raise SystemExit(1)
 
 
-def teleop(config=CONFIG, leader_config=LEADER_CONFIG, settings_path=SETTINGS_PATH,
+def _teleop(config=CONFIG, leader_config=LEADER_CONFIG, settings_path=SETTINGS_PATH,
            side="both", gripper_open_deg=270., gripper=True, *,
            gripper_settings_path=GRIPPER_SETTINGS_PATH, gripper_torque_nm=None,
-           source_factory=StarArmSource, bus_factory=MotorBus, startup_timeout=15., shutdown_timeout=5.):
+           source_factory=StarArmSource, bus_factory=MotorBus, startup_timeout=15., shutdown_timeout=5.,
+           recording_session=None):
     if not math.isfinite(gripper_open_deg) or not 0 < gripper_open_deg <= 270:
         raise ValueError("Gripper opening must be positive and at most the official 270-degree limit.")
     if any(not math.isfinite(value) or value <= 0 for value in (startup_timeout, shutdown_timeout)):
@@ -345,7 +353,8 @@ def teleop(config=CONFIG, leader_config=LEADER_CONFIG, settings_path=SETTINGS_PA
             source_ready, source_prepared, stop, heartbeat, reports, source_factory))
         add(f"motor-{name}", motor_worker, (f"motor-{name}", index, arms[name], channels[name], count,
             gripper_open_deg, targets, phases, motor_ready, motor_prepared, motor_enabled,
-            stop, heartbeat, reports, cfg, bus_factory))
+            stop, heartbeat, reports, cfg, bus_factory,
+            recording_session.samples if recording_session is not None else None))
     mapper_ready = context.Event()
     ready.append(mapper_ready)
     add("target", target_worker, (sides, leaders, arms, count, gripper_open_deg, sources, targets,
@@ -364,6 +373,8 @@ def teleop(config=CONFIG, leader_config=LEADER_CONFIG, settings_path=SETTINGS_PA
     def monitor(keys):
         heartbeat.publish([], time.monotonic())
         collect()
+        if recording_session is not None:
+            recording_session.check()
         if keys.pressed():
             stop.set()
         for process in workers:
@@ -405,14 +416,29 @@ def teleop(config=CONFIG, leader_config=LEADER_CONFIG, settings_path=SETTINGS_PA
                 if wait_ready(ready, keys):
                     phases["prepare"].set()
                     if wait_ready(prepared, keys):
-                        phases["enable"].set()
-                        if wait_ready(enabled, keys):
-                            phases["run"].set()
-                            while not stop.is_set():
+                        if recording_session is not None:
+                            deadline = time.monotonic() + startup_timeout
+                            while not stop.is_set() and not recording_session.ready():
                                 monitor(keys)
+                                if time.monotonic() >= deadline:
+                                    raise TimeoutError("Recording startup timed out before motor enable.")
                                 stop.wait(.01)
+                        if not stop.is_set():
+                            phases["enable"].set()
+                            if wait_ready(enabled, keys):
+                                if recording_session is not None:
+                                    recording_session.start()
+                                phases["run"].set()
+                                while not stop.is_set():
+                                    monitor(keys)
+                                    stop.wait(.01)
             finally:
                 stop.set()
+                if recording_session is not None:
+                    try:
+                        recording_session.stop_cameras()
+                    except (OSError, RuntimeError) as exc:
+                        messages.append({"type": "error", "worker": "record-camera", "error": str(exc)})
                 deadline = time.monotonic() + shutdown_timeout
                 while any(process.is_alive() for process in started_workers) and time.monotonic() < deadline:
                     try:
@@ -451,6 +477,33 @@ def teleop(config=CONFIG, leader_config=LEADER_CONFIG, settings_path=SETTINGS_PA
     return messages
 
 
+def teleop(config=CONFIG, leader_config=LEADER_CONFIG, settings_path=SETTINGS_PATH,
+           side="both", gripper_open_deg=270., gripper=True, *,
+           gripper_settings_path=GRIPPER_SETTINGS_PATH, gripper_torque_nm=None,
+           source_factory=StarArmSource, bus_factory=MotorBus, startup_timeout=15., shutdown_timeout=5.,
+           recording=None):
+    session = None
+    try:
+        if recording is not None:
+            from rebot_recording import RecordingSession
+
+            if side != "both" or not gripper:
+                raise ValueError("Dataset recording requires both arms and both grippers.")
+            _, arms, _, _ = load_bindings(config, leader_config, side)
+            session = RecordingSession(recording, arms)
+        messages = _teleop(config=config, leader_config=leader_config, settings_path=settings_path,
+            side=side, gripper_open_deg=gripper_open_deg, gripper=gripper,
+            gripper_settings_path=gripper_settings_path, gripper_torque_nm=gripper_torque_nm,
+            source_factory=source_factory, bus_factory=bus_factory, startup_timeout=startup_timeout,
+            shutdown_timeout=shutdown_timeout, recording_session=session)
+        if session is not None and session.started:
+            session.finish()
+        return messages
+    finally:
+        if session is not None:
+            session.close()
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default=CONFIG, help="Follower bindings YAML")
@@ -464,11 +517,27 @@ def main():
                         help="RS gripper host position gains and total torque limit YAML")
     parser.add_argument("--gripper-torque-nm", type=float,
                         help="Override the maximum absolute total gripper tracking torque in Nm")
+    parser.add_argument("--dataset", type=Path, help="Record one episode into this dataset directory")
+    parser.add_argument("--instruction", help="Task instruction covering the recorded episode")
+    parser.add_argument("--episode-id", help="Unique episode directory name (default: generated UUID)")
+    parser.add_argument("--camera", action="append", metavar="ID=DEVICE",
+                        help="Named RGB camera; repeat for multiple cameras, e.g. top=/dev/video0")
+    parser.add_argument("--record-gripper-open-deg", type=float, default=270.,
+                        help="Physical fully-open angle for recorded openness, independent of control travel")
     args = parser.parse_args()
     try:
+        recording = None
+        if args.dataset is not None:
+            from rebot_recording import RecordingOptions, parse_cameras
+
+            recording = RecordingOptions(args.dataset, args.instruction, parse_cameras(args.camera),
+                                         args.episode_id, args.record_gripper_open_deg)
+        elif args.instruction is not None or args.camera is not None or args.episode_id is not None:
+            raise ValueError("Recording arguments require --dataset.")
         teleop(config=args.config, leader_config=args.leader_config, settings_path=args.settings,
                side=args.side, gripper_open_deg=args.gripper_open_deg, gripper=not args.no_gripper,
-               gripper_settings_path=args.gripper_settings, gripper_torque_nm=args.gripper_torque_nm)
+               gripper_settings_path=args.gripper_settings, gripper_torque_nm=args.gripper_torque_nm,
+               recording=recording)
         return 0
     except (OSError, ValueError, RuntimeError, ImportError, can.CanError, yaml.YAMLError,
             subprocess.SubprocessError) as exc:
