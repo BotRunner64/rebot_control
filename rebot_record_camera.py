@@ -18,6 +18,12 @@ def report(kind, **values):
     print(json.dumps({"type": kind, **values}), flush=True)
 
 
+def recording_size(width, height):
+    """Fit within 960 pixels without cropping; align I420 dimensions to even values."""
+    scale = min(1., 960 / max(width, height))
+    return max(2, int(width * scale) // 2 * 2), max(2, int(height * scale) // 2 * 2)
+
+
 def monotonic_offset(clock):
     """Bridge the selected GStreamer clock to Python's process-shared monotonic clock."""
     candidates = []
@@ -74,9 +80,9 @@ class CameraRecorder:
             self.timestamps = Path(timestamps).open("xb")
             source_description = "videotestsrc is-live=true name=camera" if test_source else "v4l2src name=camera"
             self.pipeline = Gst.parse_launch(
-                source_description + " ! capsfilter name=mode ! decodebin ! videoconvert "
-                "! video/x-raw,format=I420 ! identity name=frames "
-                "! x264enc tune=zerolatency speed-preset=ultrafast bframes=0 "
+                source_description + " ! capsfilter name=mode ! decodebin ! videoconvert ! videoscale "
+                "! capsfilter name=record_size ! identity name=frames "
+                "! x264enc tune=zerolatency speed-preset=ultrafast bframes=0 pass=qual quantizer=23 bitrate=50000 "
                 "! video/x-h264,stream-format=avc,alignment=au ! mp4mux ! filesink name=output sync=false"
             )
             clock = Gst.SystemClock.obtain()
@@ -91,7 +97,12 @@ class CameraRecorder:
             selected = (Gst.Caps.from_string("video/x-raw,width=160,height=120,framerate=20/1")
                         if test_source else choose_format(camera.get_static_pad("src").query_caps(None)))
             self.pipeline.get_by_name("mode").set_property("caps", selected)
+            info = selected.get_structure(0)
+            width, height = recording_size(info.get_int("width")[1], info.get_int("height")[1])
+            self.pipeline.get_by_name("record_size").set_property("caps", Gst.Caps.from_string(
+                f"video/x-raw,format=I420,width={width},height={height},pixel-aspect-ratio=1/1"))
             print(f"Camera {source}: {selected.to_string()}", file=sys.stderr, flush=True)
+            print(f"Recording {width}x{height}, H.264 CRF 23.", file=sys.stderr, flush=True)
             self.pipeline.get_by_name("frames").get_static_pad("src").add_probe(
                 Gst.PadProbeType.BUFFER, self.on_frame)
             if self.pipeline.set_state(Gst.State.PLAYING) == Gst.StateChangeReturn.FAILURE:
