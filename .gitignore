@@ -1,8 +1,24 @@
+# Python
 __pycache__/
 *.py[cod]
-stararm.local.yaml
-rebot.local.yaml
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+
+# Local machine configuration (USB paths, motor UIDs)
+*.local.yaml
+
+# Run artifacts
 calibration_runs/
 motion_runs/
 trajectory_runs/
 datasets/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
