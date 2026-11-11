@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Episode Studio</title>
+  <link rel="stylesheet" href="/style.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <header>
+    <h1>Episode Studio</h1>
+    <select id="recording" aria-label="Recording" hidden></select>
+    <span id="save-status" role="status">Loading…</span>
+    <button id="undo" aria-label="Undo" title="Undo (Ctrl/⌘ Z)" disabled>↶</button>
+    <button id="export" class="primary" disabled>Export</button>
+  </header>
+  <div class="instruction-row"><label for="instruction">Instruction</label><input id="instruction" autocomplete="off" disabled></div>
+  <p id="notice" role="alert" hidden></p>
+  <main>
+    <div id="cameras" aria-label="Cameras"></div>
+    <div class="transport">
+      <button id="play" aria-label="Play" title="Play / pause (Space)" disabled>▶</button>
+      <output id="clock">00:00.000</output><span class="muted">/ <span id="duration">00:00.000</span></span>
+      <span id="episode-count" class="muted"></span>
+      <button id="selection-action" hidden>Exclude</button>
+    </div>
+    <section class="timeline" aria-label="Timeline" title="Drag edges to trim. Double-click to cut. Ctrl+wheel to zoom.">
+      <div id="timeline-scroll"><div id="timeline-content"><div id="ruler"></div><div id="timeline-clips" aria-label="Episode clips"></div><div id="playhead" role="slider" tabindex="0" aria-label="Recording playhead" aria-valuemin="0" aria-valuemax="1" aria-valuenow="0"><span></span></div></div></div>
+    </section>
+  </main>
+</body>
+</html>

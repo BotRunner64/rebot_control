@@ -104,6 +104,14 @@ python rebot_collect.py --dataset datasets/cup \
 
 先录制、之后批量标注时，可直接运行 `python rebot_collect.py --dataset datasets/cup`：自动发现相机并以 `camera_0`、`camera_1` 等命名，instruction 暂填 `__pending__`。也可用 `--camera 0 --camera 2` 指定设备但不命名。占位值在训练前补全，保存目录与原有格式保持一致。
 
+采集与处理分离：将每次完整录制作为原始连续 session，使用独立脚本和本地网页回放、拆分最终 episode、填写 instruction 并设置相机名称：
+
+```bash
+python rebot_process.py --dataset datasets/cup --output datasets/cup_processed
+```
+
+打开 `http://127.0.0.1:8090`，整段录制统一填写 instruction，相机名称直接在画面角落修改。首次打开自动拆分一次，随后直接拖动时间轴边界复核 reset 排除范围；刷新保留手动结果。支持独立草稿、撤销和 `--export` 命令行批处理；原始数据保持不变，输出必须使用新目录。完整说明见 [连续采集与离线处理](docs/processing.md)。
+
 ### Star Arm 遥操实体 reBot
 
 `rebot_teleop.py` 将 Star Arm 的七路串口角度映射为实体 RS 的原生 MIT 位置、速度和 PD 指令；遥操不启用重力补偿，前馈力矩设为零，不启动 viewer。默认控制左右双臂及两只夹爪，也支持只连接单侧。运行即使能选中的电机，无需使能开关。

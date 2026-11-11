@@ -1,6 +1,6 @@
 # 遥操作数据采集与 reBot 源契约
 
-本实现以用户提供的 `LOOM-data/docs/contract/export-contract.md` 为目标格式：一次遥操作进程运行产生一个 episode，退出并校验成功后发布到数据集。不连接下游项目、不修改其契约文件。
+本实现以用户提供的 `LOOM-data/docs/contract/export-contract.md` 为目标格式。采用采集和处理分离流程时，一次遥操作运行保存一个连续原始 session，物理上沿用 episode 目录格式，退出并校验成功后发布到原始数据集。最终 episode 拆分、instruction 与相机语义命名通过独立的 [离线处理工具](processing.md) 完成。不连接下游项目、不修改其契约文件。
 
 ## 使用
 
