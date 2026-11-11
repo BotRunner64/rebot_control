@@ -3,10 +3,13 @@
 import copy
 import fcntl
 import hashlib
+from http.client import HTTPConnection
+from http.server import ThreadingHTTPServer
 import json
 from pathlib import Path
 import subprocess
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -15,7 +18,7 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from rebot_process import Workspace, write_json
+from rebot_process import Handler, Workspace, write_json
 from rebot_recording import schemas
 
 
@@ -52,6 +55,7 @@ assert m and m.type == Gst.MessageType.EOS
                 pq.write_table(pa.Table.from_arrays([pa.array(times), pa.array(values, type=schema[kind][1].type)], schema=schema[kind]), directory / "state" / f"{side}_{kind}.parquet")
         (self.raw / "episodes.jsonl").write_text(json.dumps({"episode_id": "continuous", "cameras": ["camera_0", "camera_1"], "instructions": [{"start_ns": 0, "end_ns": 1297000000, "text": "__pending__"}]}) + "\n")
         self.workspace = Workspace(self.raw, self.root / "processed", self.root / "draft.json")
+        self.addCleanup(self.workspace.previews.close)
         self.plan = self.workspace.empty_plan()
         self.plan["camera_names"] = {"camera_0": "top", "camera_1": "left_wrist"}
         self.plan["episodes"] = [{"id": "pick", "session": "continuous", "start_ns": 125_000_000,
@@ -213,6 +217,47 @@ assert m and m.type == Gst.MessageType.EOS
             self.workspace.frame("continuous", "camera_0", 0)
         for capture in self.workspace.captures.values():
             capture.release()
+
+    def test_native_video_stream_supports_seeking_without_changing_source(self):
+        before = self.digest()
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        server.workspace = self.workspace
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        connection = HTTPConnection(*server.server_address, timeout=5)
+        try:
+            url = "/api/video?session=continuous&camera=camera_0"
+            source = self.workspace.path("continuous", "rgb", "camera_0.mp4").read_bytes()
+            for method, requested, status, content in (
+                    ("GET", None, 200, source),
+                    ("HEAD", None, 200, b""),
+                    ("GET", "bytes=0-31", 206, source[:32]),
+                    ("GET", "bytes=32-", 206, source[32:]),
+                    ("GET", "bytes=-32", 206, source[-32:]),
+                    ("GET", f"bytes={len(source) - 4}-{len(source) + 99}", 206, source[-4:]),
+                    ("GET", "bytes=999999999-", 416, b""),
+                    ("GET", "bytes=3-1", 416, b""),
+                    ("GET", "bytes=-0", 416, b""),
+                    ("GET", "bytes=", 416, b""),
+                    ("GET", "bytes=0-1,3-4", 416, b"")):
+                with self.subTest(method=method, range=requested):
+                    connection.request(method, url, headers={"Range": requested} if requested else {})
+                    response = connection.getresponse()
+                    self.assertEqual(response.status, status)
+                    self.assertEqual(response.read(), content)
+                    if status != 416:
+                        self.assertEqual(response.getheader("Content-Type"), "video/mp4")
+                        self.assertEqual(response.getheader("Accept-Ranges"), "bytes")
+                    if status == 206:
+                        self.assertTrue(response.getheader("Content-Range").endswith(f"/{len(source)}"))
+                    if status == 416:
+                        self.assertEqual(response.getheader("Content-Range"), f"bytes */{len(source)}")
+            connection.request("GET", "/api/video?session=continuous&camera=../camera_0")
+            self.assertEqual(connection.getresponse().status, 400)
+            self.assertEqual(before, self.digest())
+        finally:
+            connection.close()
+            server.shutdown(); server.server_close(); thread.join()
 
 
 if __name__ == "__main__":

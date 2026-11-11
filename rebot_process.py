@@ -14,7 +14,7 @@ import subprocess
 import sys
 import tempfile
 import threading
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, urlencode, urlsplit
 
 import numpy as np
 import pyarrow as pa
@@ -22,6 +22,7 @@ import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 from rebot_reset_detection import DEFAULTS, MAX_AGE_NS, STEP_NS, suggest_ranges
+from rebot_preview import PreviewCache
 
 
 ASSETS = Path(__file__).with_name("web") / "process"
@@ -96,6 +97,19 @@ class Workspace:
         self.job = {"state": "idle"}
         self.captures, self.capture_lock = {}, threading.Lock()
         self.analysis_cache = {}
+        self.previews = PreviewCache(self.plan_path.parent / ".rebot-preview")
+
+    def preview(self, session):
+        if session not in self.sessions:
+            raise ValueError("Unknown recording.")
+        sources = {camera["id"]: self.path(session, "rgb", camera["id"] + ".mp4")
+                   for camera in self.sessions[session]["cameras"]}
+        result = self.previews.prepare(sources.values())
+        if result["state"] == "ready":
+            result["videos"] = {camera: "/api/video?" + urlencode({"session": session, "camera": camera,
+                                  "preview": "1", "key": self.previews.path(source).stem})
+                                for camera, source in sources.items()}
+        return result
 
     def path(self, session, group, filename):
         path = (self.dataset / "episodes" / session / group / filename).resolve()
@@ -324,6 +338,66 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def video(self, query, *, head=False):
+        workspace = self.server.workspace
+        session, camera = query["session"][0], query["camera"][0]
+        if (session, "rgb", camera) not in workspace.streams:
+            raise ValueError("Unknown camera or session.")
+        path = workspace.path(session, "rgb", camera + ".mp4")
+        if query.get("preview") == ["1"]:
+            path = workspace.previews.path(path)
+            if not path.is_file():
+                raise ValueError("Preview is not ready.")
+        with path.open("rb") as stream:
+            size = os.fstat(stream.fileno()).st_size
+            start, end, status = 0, size - 1, 200
+            requested = self.headers.get("Range")
+            if requested is not None:
+                match = re.fullmatch(r"bytes=(\d*)-(\d*)", requested)
+                if match and any(match.groups()):
+                    first, last = match.groups()
+                    if first:
+                        start = int(first)
+                        end = min(int(last), size - 1) if last else size - 1
+                    else:
+                        start = max(0, size - int(last))
+                    status = 206
+                if not match or not any(match.groups()) or not 0 <= start <= end < size:
+                    self.send_response(416)
+                    self.send_header("Content-Range", f"bytes */{size}")
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+            self.send_response(status)
+            self.send_header("Content-Type", "video/mp4")
+            self.send_header("Accept-Ranges", "bytes")
+            self.send_header("Content-Length", str(end - start + 1))
+            self.send_header("Cache-Control", "private, max-age=3600")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            if status == 206:
+                self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+            self.end_headers()
+            if head:
+                return
+            stream.seek(start)
+            remaining = end - start + 1
+            while remaining:
+                chunk = stream.read(min(256 * 1024, remaining))
+                if not chunk:
+                    break
+                self.wfile.write(chunk)
+                remaining -= len(chunk)
+
+    def do_HEAD(self):
+        url = urlsplit(self.path)
+        try:
+            if url.path == "/api/video":
+                self.video(parse_qs(url.query), head=True)
+            else:
+                self.send_error(404)
+        except (ValueError, KeyError, OSError):
+            self.send_error(400)
+
     def do_GET(self):
         workspace = self.server.workspace
         url = urlsplit(self.path)
@@ -337,6 +411,11 @@ class Handler(BaseHTTPRequestHandler):
                 query = parse_qs(url.query)
                 reference = query.get("reference_ns", [None])[0]
                 self.respond(200, workspace.suggest(query["session"][0], reference_ns=int(reference) if reference is not None else None))
+            elif url.path == "/api/video":
+                self.video(parse_qs(url.query))
+            elif url.path == "/api/preview":
+                query = parse_qs(url.query)
+                self.respond(200, workspace.preview(query["session"][0]))
             elif url.path in ("/api/frame", "/api/times"):
                 query = parse_qs(url.query)
                 session, camera = query["session"][0], query["camera"][0]
@@ -344,17 +423,18 @@ class Handler(BaseHTTPRequestHandler):
                     self.respond(200, workspace.frame(session, camera, int(query["t"][0])), "image/jpeg")
                 else:
                     self.respond(200, workspace.streams[session, "rgb", camera].tolist())
-            elif url.path in ("/", "/app.js", "/style.css"):
+            elif url.path in ("/", "/app.js", "/playback.js", "/style.css"):
                 filename, mime = {"/": ("index.html", "text/html; charset=utf-8"),
                                   "/app.js": ("app.js", "text/javascript; charset=utf-8"),
+                                  "/playback.js": ("playback.js", "text/javascript; charset=utf-8"),
                                   "/style.css": ("style.css", "text/css; charset=utf-8")}[url.path]
                 self.respond(200, (ASSETS / filename).read_bytes(), mime)
             else:
                 self.respond(404, {"error": "Not found"})
-        except (ValueError, KeyError, OSError) as exc:
-            self.respond(400, {"error": str(exc)})
         except (BrokenPipeError, ConnectionResetError):
             pass
+        except (ValueError, KeyError, OSError) as exc:
+            self.respond(400, {"error": str(exc)})
 
     def do_POST(self):
         try:
@@ -403,6 +483,7 @@ def main(argv=None):
             pass
         finally:
             server.server_close()
+            workspace.previews.close()
             for capture in workspace.captures.values():
                 capture.release()
         return 0

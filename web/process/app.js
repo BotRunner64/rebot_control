@@ -1,10 +1,12 @@
+import {SynchronizedPlayback} from "./playback.js";
+
 const $ = (id) => document.getElementById(id);
 const clone = (value) => structuredClone(value);
 let workspace, plan, session, selected = null, selectedGap = null, detecting = false, position = 0, playing = false;
 let times = [], zoom = 1, history = [], drag = null;
 let saveTimer, saveQueue = Promise.resolve(), revision = 0, savedRevision = 0;
-let previewRevision = 0, frameBusy = false, previewNeeded = false;
-let positionAnchor = 0, clockAnchor = 0, jobTimer, exporting = false;
+let playback, sessionRevision = 0, previewReady = false;
+let jobTimer, exporting = false;
 const cameraViews = new Map();
 
 function time(value) {
@@ -98,9 +100,11 @@ async function suggestEpisodes() {
   finally { detecting = false; updateStatus(); }
 }
 function setPlaying(value) {
+  if (!playback) return;
+  if (value) playback.play(); else playback.pause();
+}
+function playbackState(value) {
   playing = value;
-  positionAnchor = position;
-  clockAnchor = performance.now();
   $("play").textContent = value ? "Ⅱ" : "▶";
   $("play").setAttribute("aria-label", value ? "Pause" : "Play");
 }
@@ -117,10 +121,8 @@ function drawPlayhead(follow = false) {
 }
 function seek(value, follow = false) {
   position = Math.max(0, Math.min(session.duration_ns - 1, Math.round(value)));
-  positionAnchor = position;
-  clockAnchor = performance.now();
   drawPlayhead(follow);
-  refreshFrames();
+  playback?.seek(position);
 }
 function upperBound(value) {
   let low = 0, high = times.length;
@@ -138,33 +140,6 @@ function snap(value) {
   const upper = upperBound(value), before = times[Math.max(0, upper - 1)], after = times[Math.min(times.length - 1, upper)];
   return Math.abs(value - before) <= Math.abs(value - after) ? before : after;
 }
-async function refreshFrames() {
-  previewNeeded = true;
-  if (frameBusy || !session) return;
-  previewNeeded = false; frameBusy = true;
-  const token = previewRevision, current = session, timestamp = position;
-  await Promise.all(current.cameras.map(async (camera) => {
-    const view = cameraViews.get(camera.id);
-    if (!view) return;
-    try {
-      const query = new URLSearchParams({session: current.id, camera: camera.id, t: timestamp});
-      const response = await fetch(`/api/frame?${query}`);
-      if (!response.ok) throw new Error((await response.json()).error);
-      const blob = await response.blob();
-      if (token !== previewRevision) return;
-      if (view.url) URL.revokeObjectURL(view.url);
-      view.url = URL.createObjectURL(blob);
-      view.image.src = view.url;
-      view.error.hidden = true; view.image.hidden = false;
-    } catch (error) {
-      if (token !== previewRevision) return;
-      view.error.textContent = error.message;
-      view.error.hidden = false; view.image.hidden = true;
-    }
-  }));
-  frameBusy = false;
-  if (previewNeeded) setTimeout(refreshFrames, 30);
-}
 async function loadFrameTimes() {
   const camera = session.cameras[0].id;
   times = [];
@@ -174,16 +149,41 @@ async function loadFrameTimes() {
     if (sid === session.id) times = result;
   } catch (error) { notice(error.message, true); }
 }
+async function loadPreviews(id, token) {
+  const message = "Preparing preview…";
+  try {
+    while (token === sessionRevision) {
+      const result = await api(`/api/preview?${new URLSearchParams({session: id})}`);
+      if (token !== sessionRevision) return;
+      if (result.state === "error") throw new Error(result.error);
+      if (result.state === "ready") {
+        for (const [camera, view] of cameraViews) view.video.src = result.videos[camera];
+        previewReady = true; updateStatus();
+        if ($("notice").textContent === message) notice("");
+        return;
+      }
+      if (!$("notice").textContent || $("notice").textContent === message) notice(message);
+      await new Promise((resolve) => setTimeout(resolve, 700));
+    }
+  } catch (error) {
+    if (token === sessionRevision) notice(error.message, true);
+  }
+}
 async function chooseSession(id, preferredId) {
-  setPlaying(false);
+  playback?.dispose(); playback = null; playbackState(false);
+  previewReady = false;
+  const token = ++sessionRevision;
   session = workspace.sessions.find((item) => item.id === id);
   $("recording").value = id;
-  previewRevision++; zoom = 1;
-  for (const view of cameraViews.values()) if (view.url) URL.revokeObjectURL(view.url);
+  zoom = 1;
   cameraViews.clear(); $("cameras").replaceChildren();
   for (const camera of session.cameras) {
     const card = element("div", "camera-view");
     const image = element("img"); image.alt = `Preview from ${camera.id}`;
+    image.hidden = true;
+    const video = element("video");
+    video.muted = true; video.playsInline = true; video.preload = "auto";
+    video.setAttribute("aria-label", `Camera ${camera.id}`);
     const error = element("span", "frame-error", "Loading…");
     const name = element("input", "camera-name");
     name.value = plan.camera_names[camera.id];
@@ -192,9 +192,13 @@ async function chooseSession(id, preferredId) {
     name.pattern = "[a-z0-9_]+";
     name.onfocus = checkpoint;
     name.oninput = () => { plan.camera_names[camera.id] = name.value.trim(); changed(); };
-    card.append(image, error, name); $("cameras").append(card);
-    cameraViews.set(camera.id, {card, image, error, name});
+    card.append(video, image, error, name); $("cameras").append(card);
+    cameraViews.set(camera.id, {card, video, image, error, name, camera});
   }
+  playback = new SynchronizedPlayback([...cameraViews.values()], session, {
+    onPosition: (value) => { position = value; drawPlayhead(playing); },
+    onPlaying: playbackState, onError: (message) => notice(message, true),
+  });
   selectedGap = null;
   // A recording starts as one episode. Only cuts and discards change its structure.
   if (!plan.initialized_sessions.includes(id)) {
@@ -207,8 +211,10 @@ async function chooseSession(id, preferredId) {
   $("playhead").setAttribute("aria-valuemax", session.duration_ns - 1);
   renderEditor(); renderTimeline();
   await loadFrameTimes();
+  if (token !== sessionRevision) return;
   const first = Math.max(...session.cameras.map((camera) => camera.first_ns || 0));
   seek(Math.min(session.duration_ns - 1, Math.max(first, selected?.start_ns || 0)));
+  loadPreviews(id, token);
   await suggestEpisodes();
 }
 function selectEpisode(item, at = null) {
@@ -230,7 +236,7 @@ function updateStatus() {
   $("export").disabled = exporting || detecting || !plan.episodes.length;
   $("undo").disabled = detecting || !history.length;
   $("recording").disabled = detecting;
-  $("play").disabled = detecting;
+  $("play").disabled = detecting || !previewReady;
   $("timeline-clips").inert = detecting;
   $("episode-count").textContent = `${entries().length} episode${entries().length === 1 ? "" : "s"}`;
 }
@@ -484,13 +490,6 @@ document.addEventListener("keydown", (event) => {
 });
 window.addEventListener("beforeunload", (event) => { if (revision !== savedRevision) { event.preventDefault(); event.returnValue = ""; } });
 window.addEventListener("resize", () => { if (session) renderTimeline(); });
-setInterval(() => {
-  if (!playing || !session) return;
-  const end = session.duration_ns - 1;
-  position = Math.min(end, Math.round(positionAnchor + (performance.now() - clockAnchor) * 1e6));
-  drawPlayhead(true); refreshFrames();
-  if (position >= end) setPlaying(false);
-}, 100);
 async function init() {
   try {
     workspace = await api("/api/workspace"); plan = workspace.plan;

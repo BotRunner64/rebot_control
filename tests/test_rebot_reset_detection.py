@@ -45,10 +45,19 @@ class ResetDetectionTests(unittest.TestCase):
 
     def test_other_arm_must_also_be_near_reference(self):
         right = self.position.copy()
-        right[self.t >= 9] += .1
+        right[self.t >= 9] += .15
         self.poses["right"] = pose_series(right)
         result = self.detect()
         self.assertEqual(len(result["resets"]), 2)
+
+    def test_imprecise_manual_return_is_detected_within_ten_centimeters(self):
+        for offset, expected in ((.0375, 4), (.055, 4), (.09, 4), (.11, 2)):
+            with self.subTest(offset=offset):
+                right = self.position * .8
+                right[self.t >= 9] += offset
+                self.poses["right"] = pose_series(right)
+                self.assertEqual(len(self.detect()["resets"]), expected)
+                self.assertEqual(len(self.detect(home_radius_cm=3)["resets"]), 2)
 
     def test_pose_orientation_prevents_false_reset_at_same_translation(self):
         angles = np.where(self.t >= 9, np.pi / 2, 0)
@@ -57,7 +66,7 @@ class ResetDetectionTests(unittest.TestCase):
         self.assertEqual(len(result["resets"]), 2)
 
     def test_short_home_pause_is_not_a_reset(self):
-        self.position[(self.t >= 7) & (self.t < 8.7)] = .1
+        self.position[(self.t >= 7) & (self.t < 8.7)] = .15
         self.poses = {side: pose_series(self.position) for side in ("left", "right")}
         self.assertEqual(len(self.detect()["resets"]), 3)
 
