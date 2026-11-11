@@ -21,6 +21,7 @@ from rebot import CONFIG, load_config, resolve_channel, verify_identity
 from rebot_hand_guiding import SETTINGS_PATH, StopKey, load_settings
 from rebot_mit import LIMITS, MotorBus
 from rebot_motion import MOTION_KD, MOTION_KP
+from rebot_safety import validate_tracking_error
 from rebot_gripper import (GripperController, SETTINGS_PATH as GRIPPER_SETTINGS_PATH,
                            load_settings as load_gripper_settings)
 from stararm import CONFIG as LEADER_CONFIG, AngleFeedbackError, load_config as load_leaders, read_angles
@@ -279,6 +280,7 @@ def motor_worker(name, index, arm, channel, count, gripper_open_deg, targets, ph
                 # Validate the consumer boundary as well as the mapper output.
                 if np.any(target < reference + low) or np.any(target > reference + high):
                     raise ValueError("Shared target exceeds the configured motor range.")
+                validate_tracking_error(target, raw, cfg["max_tracking_error_deg"])
                 torques = np.zeros(count)
                 if gripper is not None:
                     feedback = bus.feedback_states(math.inf)[6]
@@ -292,6 +294,7 @@ def motor_worker(name, index, arm, channel, count, gripper_open_deg, targets, ph
                 # Each MIT command already returns position; avoid seven extra queries.
                 raw = validate_pose(bus.feedback_positions(math.inf), reference, low, high)
                 bus.set_hold(raw, zero, kp, kd)
+                validate_tracking_error(target, raw, cfg["max_tracking_error_deg"])
                 if recording_samples is not None:
                     publish_feedback(recording_samples, name.removeprefix("motor-"),
                                      bus.feedback_states(math.inf))

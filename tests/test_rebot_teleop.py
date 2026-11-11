@@ -292,6 +292,20 @@ class ProcessLifecycleTests(unittest.TestCase):
         self.assertEqual(rates["motor-right"]["requested_hz"], 200)
         self.assertGreater(rates["target"]["count"], 0)
 
+    def test_initial_large_error_stops_both_arms_without_sending_leader_target(self):
+        with self.assertRaisesRegex(RuntimeError, "Tracking error limit exceeded.*J1"):
+            self.run_teleop(failure="tracking_jump")
+        for record in self.assert_holding().values():
+            self.assertLessEqual(record["calls"], 1)
+            self.assertIsNone(record["second"])
+
+    def test_running_large_error_stops_following_and_holds_both_arms(self):
+        with self.assertRaisesRegex(RuntimeError, "Tracking error limit exceeded.*J1"):
+            self.run_teleop(failure="tracking_jump_later")
+        for record in self.assert_holding().values():
+            if record["parameters"] is not None:
+                self.assertLess(abs(record["parameters"][0]["position"] - .2), math.radians(45))
+
     def test_single_arm_without_gripper_owns_only_selected_hardware(self):
         self.run_teleop(side="right", gripper=False)
         motors = self.assert_holding(("can1",), 6)

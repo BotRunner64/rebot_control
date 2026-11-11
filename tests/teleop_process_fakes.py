@@ -195,6 +195,10 @@ class FakeSource:
                 finger = 10. + 1. + math.degrees(1.19 - .2) * 44. / 270.
             if self.factory.grasp == 'closed_margin':
                 finger = 10.7
+        if self.factory.failure == 'tracking_jump':
+            return [90.] + [30.] * 5 + [finger]
+        if self.factory.failure == 'tracking_jump_later' and sum(self.factory.counts) >= 12:
+            return [90.] + [30.] * 5 + [finger]
         return [30.] * 6 + [finger]
 
     def release(self):

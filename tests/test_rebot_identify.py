@@ -135,7 +135,8 @@ class ModelTests(unittest.TestCase):
     def test_effort_budget_does_not_distort_position_and_velocity_targets(self):
         cfg = identify.motion_settings(drive.load_settings())
         controller = identify.MotionController(gravity.GravityModel(), cfg)
-        target = np.array([0., .6, 2., 0., .1, 0.])
+        # Stay below the tracking guard while still exceeding the effort budget.
+        target = np.array([0., .6, 1.9, 0., .1, 0.])
         velocity = np.array([0., 0., .04, 0., 0., 0.])
         sent = []
         models = ["rs-06"] * 3 + ["rs-00"] * 3

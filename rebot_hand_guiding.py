@@ -20,12 +20,14 @@ import yaml
 from rebot import CONFIG, load_config, resolve_channel, verify_identity
 from rebot_mit import MotorBus
 from rebot_gravity import GravityModel, vector
+from rebot_safety import DEFAULT_MAX_TRACKING_ERROR_DEG
 
 SETTINGS_PATH = Path(__file__).with_suffix(".yaml")
 VECTOR_KEYS = {"hold_kp", "damping", "torque_limit_nm", "gravity_scale"}
 SCALAR_KEYS = {"rate_hz", "max_sample_gap_s", "max_feedback_age_s",
                "max_temperature_c", "startup_duration_s", "hold_ramp_s", "velocity_filter_s",
-               "still_speed_rad_s", "release_speed_rad_s", "release_error_rad", "settle_duration_s"}
+               "still_speed_rad_s", "release_speed_rad_s", "release_error_rad", "settle_duration_s",
+               "max_tracking_error_deg"}
 
 
 class StopKey:
@@ -57,6 +59,9 @@ class StopKey:
 
 def load_settings(path=SETTINGS_PATH):
     settings = yaml.safe_load(path.read_text())
+    if isinstance(settings, dict):
+        # Existing settings files inherit the same enabled tracking protection.
+        settings.setdefault("max_tracking_error_deg", DEFAULT_MAX_TRACKING_ERROR_DEG)
     expected = VECTOR_KEYS | SCALAR_KEYS
     if not isinstance(settings, dict) or set(settings) != expected:
         raise ValueError(f"Settings must contain exactly these keys: {sorted(expected)}")

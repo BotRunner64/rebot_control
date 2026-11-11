@@ -7,6 +7,7 @@ import numpy as np
 
 from rebot_kinematics import vector6
 from rebot_motion import MOTION_KD, MOTION_KP
+from rebot_safety import validate_tracking_error
 from rebot_teleop import validate_pose
 from rebot_teleop_runtime import LoopTiming
 
@@ -74,12 +75,14 @@ class MotorWorker:
                 with self.lock:
                     target = self.target.copy()
                     measured = self.raw.copy()
+                validate_tracking_error(target, measured, self.cfg["max_tracking_error_deg"])
                 gravity = self.gravity(measured)
                 self.bus.command_position(target, zero, gravity, MOTION_KP, MOTION_KD,
                                           began + self.cfg["max_feedback_age_s"])
                 raw = validate_pose(self.bus.feedback_positions(self.cfg["max_feedback_age_s"]),
                                     self.reference, self.lower, self.upper)
                 self.bus.set_hold(raw, self.gravity(raw), MOTION_KP, MOTION_KD)
+                validate_tracking_error(target, raw, self.cfg["max_tracking_error_deg"])
                 with self.lock:
                     self.raw = raw.copy()
                 timing.complete(began, time.monotonic())

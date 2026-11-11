@@ -9,6 +9,7 @@ from pathlib import Path
 import numpy as np
 
 from rebot_gravity import vector
+from rebot_safety import validate_tracking_error
 
 
 # Native movement gains from the reference config/rebotarm_rs.yaml.
@@ -75,6 +76,7 @@ class MotionController:
         desired_velocity = (np.zeros(6) if desired_velocity is None
                             else vector(desired_velocity, "desired_velocity"))
         cfg = self.cfg
+        validate_tracking_error(target, q, cfg["max_tracking_error_deg"])
         self.model.validate(q)
         raw_velocity = np.zeros(6)
         dt = 0.

@@ -2,6 +2,8 @@
 rate_hz: 50
 max_sample_gap_s: 0.10
 max_feedback_age_s: 0.08
+# Maximum absolute target/measured error on any J1-J6; gripper excluded.
+max_tracking_error_deg: 45.0
 # Legacy compatibility setting; temperature is recorded without host-side shutdown.
 max_temperature_c: 65
 # Retain initial pose and full gravity support before allowing drag release.
