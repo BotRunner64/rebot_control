@@ -90,6 +90,7 @@ python rebot_mirror.py --no-browser --port 8080
 
 ### 遥操作数据采集
 
+本机真机数据统一存放在 `/mnt/data/rebot_data`，仓库的 `datasets` 是指向该目录的软链接。以下命令中的 `datasets/...` 会直接读写数据盘；原始录制、处理草稿、预览缓存和导出结果都存放在这里。
 
 独立入口 `rebot_collect.py` 同时启动遥操作与数据采集，采集从臂的实际 EEF 位姿、实际夹爪开合和带逐帧时间索引的 H.264 视频，按 LOOM 目标格式保存。一次运行生成一个 episode，要求双臂、双夹爪和至少一路相机：
 
@@ -115,6 +116,7 @@ python rebot_process.py --dataset datasets/cup --output datasets/cup_processed
 
 打开 `http://127.0.0.1:8090`，整段录制统一填写 instruction，相机名称直接在画面角落修改。首次打开自动拆分一次，随后直接拖动时间轴边界复核 reset 排除范围；刷新保留手动结果。支持独立草稿、撤销和 `--export` 命令行批处理；原始数据保持不变，输出必须使用新目录。完整说明见 [连续采集与离线处理](docs/processing.md)。
 
+处理完成后，在 `rebot_control` conda 环境运行 `python rebot_to_lerobot.py --dataset datasets/cup_processed --output datasets/cup_lerobot_v3 --repo-id local/cup` 导出 **30 FPS LeRobot v3** 数据集。脚本按原始时间戳最近邻对齐双臂 EEF、夹爪与视频，保留 26 维位姿/开合表示，以下一同步时刻的实测状态作为动作目标。LeRobot 已加入项目依赖；完整安装、同步规则及 OpenPI 接入要求见 [LeRobot v3 转换说明](docs/lerobot.md)。
 
 ### Star Arm 遥操实体 reBot
 

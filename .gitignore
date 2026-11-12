@@ -16,7 +16,7 @@ venv/
 calibration_runs/
 motion_runs/
 trajectory_runs/
-datasets/
+/datasets
 
 # Editor / OS
 .DS_Store
