@@ -11,11 +11,14 @@ import os
 from pathlib import Path
 import queue
 import signal
+import socket
 import subprocess
 import tempfile
+import threading
 import time
 import unittest
 from unittest.mock import MagicMock, patch
+from urllib.request import Request, urlopen
 
 import mujoco
 import numpy as np
@@ -39,6 +42,14 @@ def gst_available():
 
 
 class RecordingUnitTests(unittest.TestCase):
+    def test_collect_camera_viewer_flag_is_opt_in(self):
+        import rebot_collect
+        for flag, enabled in (([], False), (["--camera-viewer"], True)):
+            with self.subTest(enabled=enabled), patch.object(rebot_collect, "teleop") as run:
+                self.assertEqual(rebot_collect.main(["--dataset", "unused", "--camera", "0", *flag]), 0)
+                options = run.call_args.kwargs["recording"]
+                self.assertEqual(options.camera_viewer, enabled)
+                self.assertEqual(options.cameras, {"camera_0": "/dev/video0"})
     def test_fk_agrees_with_mujoco_mount_and_contract_axes(self):
         model = mujoco.MjModel.from_xml_path(str(recording.MODEL_PATH))
         data = mujoco.MjData(model)
@@ -92,9 +103,10 @@ class RecordingIntegrationTests(unittest.TestCase):
         self.root = Path(self.temporary.name)
         self.arms = {side: {"reference_rad": [.2] * 7} for side in recording.SIDES}
 
-    def open_session(self, name):
-        options = recording.RecordingOptions(self.root, "pick up the cup", {"top": "synthetic"}, name)
-        session = recording.RecordingSession(options, self.arms, camera_factory=CAMERA_FACTORY)
+    def open_session(self, name, *, viewer=False, camera_factory=CAMERA_FACTORY, cameras=None):
+        options = recording.RecordingOptions(self.root, "pick up the cup", cameras or {"top": "synthetic"}, name,
+                                             camera_viewer=viewer)
+        session = recording.RecordingSession(options, self.arms, camera_factory=camera_factory)
         self.addCleanup(session.close)
         deadline = time.monotonic() + 8.
         while not session.ready():
@@ -102,6 +114,169 @@ class RecordingIntegrationTests(unittest.TestCase):
                 self.fail("Synthetic recording startup timed out")
             time.sleep(.01)
         return session
+
+    def finish_sample(self, session):
+        for side in recording.SIDES:
+            now = time.monotonic_ns()
+            session.samples.put((side, now, [.2] * 7, now))
+        with redirect_stdout(io.StringIO()):
+            session.finish(timeout=10)
+        session.close()
+        import pyarrow.parquet as pq
+        path = self.root / "episodes" / session.episode_id
+        table = pq.read_table(path / "rgb" / "top.parquet")
+        self.assertEqual(table["frame_index"].to_pylist(), list(range(table.num_rows)))
+        times = table["timestamp_ns"].to_numpy()
+        self.assertTrue(np.all(np.diff(times) > 0))
+        self.assertAlmostEqual(float(np.median(np.diff(times))), 50_000_000, delta=1_000_000)
+        return table
+
+    def test_live_viewer_uses_recorded_frames_and_closing_it_keeps_recording(self):
+        viewer_factory = partial(recording.RecordingViewer, open_browser=False, port=0)
+        with patch.object(recording, "RecordingViewer", side_effect=viewer_factory):
+            session = self.open_session("viewer", viewer=True)
+        session.start()
+        started = time.monotonic()
+        deadline = time.monotonic() + 8
+        while not (session.viewer.root / "url").exists():
+            self.assertIsNone(session.viewer.process.poll())
+            if time.monotonic() >= deadline:
+                self.fail("Recording viewer did not start")
+            time.sleep(.02)
+        url = (session.viewer.root / "url").read_text()
+        while True:
+            with urlopen(url + "/api/cameras", timeout=2) as response:
+                state = json.load(response)
+            if state["cameras"][0]["state"] == "live":
+                break
+            self.assertNotEqual(state["cameras"][0]["state"], "error", state)
+            if time.monotonic() >= deadline:
+                self.fail("No live frame arrived")
+            time.sleep(.02)
+        self.assertTrue(state["recording"])
+        self.assertIn("top", state["cameras"][0]["source"])
+        with urlopen(url + "/streams/0.mjpg", timeout=2) as response:
+            response.readline(); response.readline()
+            size = int(response.readline().split(b":")[1])
+            response.readline()
+            jpeg = response.read(size)
+        self.assertTrue(jpeg.startswith(b"\xff\xd8") and jpeg.endswith(b"\xff\xd9"))
+        request = Request(url + "/api/stop", data=b"{}",
+                          headers={"Origin": url, "Content-Type": "application/json"})
+        with urlopen(request, timeout=2) as response:
+            self.assertEqual(json.load(response), {"stopped": True})
+        self.assertEqual(session.viewer.process.wait(4), 0)
+        closed_at = time.monotonic() - started
+        time.sleep(.55)
+        session.check()
+        self.assertIsNone(session.cameras[0].process.poll())
+        table = self.finish_sample(session)
+        self.assertGreater(table.num_rows, 10)
+        # Verify finalized timestamps: the live index is buffered until shutdown.
+        self.assertGreater(table["timestamp_ns"][-1].as_py(), (closed_at + .3) * 1e9)
+
+    def test_viewer_crash_does_not_stop_recording(self):
+        viewer_factory = partial(recording.RecordingViewer, open_browser=False, port=0)
+        with patch.object(recording, "RecordingViewer", side_effect=viewer_factory):
+            session = self.open_session("crashed_viewer", viewer=True)
+        session.start()
+        session.viewer.process.kill()
+        session.viewer.process.wait(2)
+        time.sleep(.6)
+        session.check()
+        self.assertIsNone(session.cameras[0].process.poll())
+        self.assertGreaterEqual(self.finish_sample(session).num_rows, 10)
+
+    def test_three_camera_previews_share_capture_and_all_streams_are_saved(self):
+        import pyarrow.parquet as pq
+        cameras = {"top": "synthetic0", "left_wrist": "synthetic1", "right_wrist": "synthetic2"}
+        viewer_factory = partial(recording.RecordingViewer, open_browser=False, port=0)
+        with patch.object(recording, "RecordingViewer", side_effect=viewer_factory):
+            session = self.open_session("three_cameras", viewer=True, cameras=cameras)
+        session.start()
+        deadline = time.monotonic() + 8
+        while not (session.viewer.root / "url").exists():
+            if time.monotonic() >= deadline:
+                self.fail("Recording viewer did not start")
+            time.sleep(.02)
+        url = (session.viewer.root / "url").read_text()
+        while True:
+            with urlopen(url + "/api/cameras", timeout=2) as response:
+                state = json.load(response)
+            if all(camera["state"] == "live" for camera in state["cameras"]):
+                break
+            if time.monotonic() >= deadline:
+                self.fail(f"Not all previews became live: {state}")
+            time.sleep(.02)
+        self.assertEqual(len(state["cameras"]), 3)
+        time.sleep(.2)
+        for camera in state["cameras"]:
+            with urlopen(url + f"/streams/{camera['id']}.mjpg", timeout=2) as response:
+                response.readline(); response.readline()
+                size = int(response.readline().split(b":")[1])
+                response.readline()
+                self.assertTrue(response.read(size).startswith(b"\xff\xd8"))
+        self.finish_sample(session)
+        for camera in cameras:
+            directory = self.root / "episodes" / session.episode_id / "rgb"
+            self.assertTrue((directory / (camera + ".mp4")).is_file())
+            self.assertGreater(pq.read_table(directory / (camera + ".parquet")).num_rows, 0)
+
+    def test_batched_start_and_stop_commands_cannot_stall_camera_exit(self):
+        camera = CAMERA_FACTORY("synthetic", self.root, "quick")
+        self.addCleanup(camera.close)
+        deadline = time.monotonic() + 5
+        while not camera.ready:
+            camera.check()
+            if time.monotonic() >= deadline:
+                self.fail("Synthetic camera did not become ready")
+            time.sleep(.01)
+        now = time.monotonic_ns()
+        commands = [{"command": "start", "timestamp_ns": now}, {"command": "stop", "timestamp_ns": now}]
+        camera.process.stdin.write(("\n".join(json.dumps(item) for item in commands) + "\n").encode())
+        camera.process.stdin.flush()
+        # An empty capture may be rejected, but stop must be consumed without hanging.
+        camera.process.wait(5)
+
+    def test_slow_preview_receiver_cannot_backpressure_recording(self):
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        path = self.root / "slow.sock"
+        listener.bind(str(path)); listener.listen(1)
+        listener.settimeout(5)
+        stopped, connected = threading.Event(), threading.Event()
+        def slow_receiver():
+            connection = None
+            try:
+                connection, _ = listener.accept()
+                connection.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024)
+                connected.set()
+                stopped.wait(5)  # Intentionally never read the preview stream.
+            finally:
+                if connection is not None:
+                    connection.close()
+        thread = threading.Thread(target=slow_receiver, daemon=True)
+        thread.start()
+        try:
+            factory = partial(recording.CameraProcess, test=True, preview_socket=path)
+            session = self.open_session("slow", camera_factory=factory)
+            session.start()
+            self.assertTrue(connected.wait(3))
+            began = time.monotonic()
+            time.sleep(1.2)
+            session.check()
+            table = self.finish_sample(session)
+            self.assertGreaterEqual(table.num_rows, 20)
+            self.assertLess(time.monotonic() - began, 5)
+        finally:
+            stopped.set(); listener.close(); thread.join(2)
+
+    def test_viewer_startup_failure_does_not_stop_recording(self):
+        with patch.object(recording, "RecordingViewer", side_effect=OSError("Viewer unavailable")), \
+                redirect_stderr(io.StringIO()):
+            session = self.open_session("no_viewer", viewer=True)
+        self.assertIsNone(session.viewer)
+        session.start(); time.sleep(.2)
+        self.assertGreater(self.finish_sample(session).num_rows, 0)
 
     def test_native_samples_shared_origin_schema_video_and_metadata_append(self):
         import pyarrow as pa

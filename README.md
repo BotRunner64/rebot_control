@@ -90,6 +90,7 @@ python rebot_mirror.py --no-browser --port 8080
 
 ### 遥操作数据采集
 
+
 独立入口 `rebot_collect.py` 同时启动遥操作与数据采集，采集从臂的实际 EEF 位姿、实际夹爪开合和带逐帧时间索引的 H.264 视频，按 LOOM 目标格式保存。一次运行生成一个 episode，要求双臂、双夹爪和至少一路相机：
 
 ```bash
@@ -104,6 +105,8 @@ python rebot_collect.py --dataset datasets/cup \
 
 先录制、之后批量标注时，可直接运行 `python rebot_collect.py --dataset datasets/cup`：自动发现相机并以 `camera_0`、`camera_1` 等命名，instruction 暂填 `__pending__`。也可用 `--camera 0 --camera 2` 指定设备但不命名。占位值在训练前补全，保存目录与原有格式保持一致。
 
+加 `--camera-viewer` 可同时打开实时画面：`python rebot_collect.py --dataset datasets/cup --camera-viewer`。预览复用采集帧，独立进程以最长边 640 像素、最多 10 FPS 显示；队列满或查看器变慢时丢弃预览帧。关闭查看器不停止采集，停止录制仍在终端操作。
+
 采集与处理分离：将每次完整录制作为原始连续 session，使用独立脚本和本地网页回放、拆分最终 episode、填写 instruction 并设置相机名称：
 
 ```bash
@@ -111,6 +114,7 @@ python rebot_process.py --dataset datasets/cup --output datasets/cup_processed
 ```
 
 打开 `http://127.0.0.1:8090`，整段录制统一填写 instruction，相机名称直接在画面角落修改。首次打开自动拆分一次，随后直接拖动时间轴边界复核 reset 排除范围；刷新保留手动结果。支持独立草稿、撤销和 `--export` 命令行批处理；原始数据保持不变，输出必须使用新目录。完整说明见 [连续采集与离线处理](docs/processing.md)。
+
 
 ### Star Arm 遥操实体 reBot
 

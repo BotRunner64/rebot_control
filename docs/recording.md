@@ -24,6 +24,16 @@ python rebot_collect.py \
 
 `rebot_collect.py` 是独立采集入口，一条命令同时运行遥操作和采集，无需另开遥操作进程。它复用已有控制和写盘模块，固定使用双臂和双夹爪。只有 `--dataset` 必填；不传 `--camera` 时自动发现相机，使用 `camera_0`、`camera_1` 等占位名；不传 `--instruction` 时写入 `__pending__`，录制后再批量补充。也可用 `--camera 0 --camera 2` 只选设备、暂不命名。输出结构保持不变，占位数据应在训练前补全标注；自动编号按本次设备枚举顺序分配。
 
+需要边采集边看画面时，加一个开关：
+
+```bash
+python rebot_collect.py --dataset datasets/cup --camera-viewer
+```
+
+自动在浏览器打开 Camera viewer，终端也会打印本机地址（从 8080 起寻找空闲端口）。预览复用本次采集的相机帧，不会再次打开设备。相机线程只向一个有界槽位交出帧引用；像素复制和限时 socket 发送由后台线程完成，缩放、JPEG 编码和网页服务在独立低优先级进程中完成。预览最长边 640 像素、最多 10 FPS，满队列或慢客户端只丢预览帧，录制管线、原生采样率和时间戳保持原样。预览失败不会纳入采集就绪屏障或停止判断。
+
+关闭网页或点击网页里的 **Close viewer** 不会结束采集；网页中的 Q/Esc 也只控制预览。停止采集仍使用终端的 Space、Esc、Q 或 Ctrl-C。采集结束后预览进程随之关闭。不加 `--camera-viewer` 时，不启动这些预览线程或进程。预览所需的 `appsrc`、`appsink`、`videoscale`、`jpegenc` 使用现有系统 GStreamer 插件。
+
 `--camera` 至少指定一路，设备也可以写编号，如 `top=0`。同一物理相机在整个数据集中必须保持相同 ID；推荐使用稳定的 `/dev/v4l/by-id/...` 设备路径。ID 只允许小写 ASCII 字母、数字和下划线，ID 和设备路径均不可重复。采集模式要求双臂和双夹爪，不支持 `--side left/right` 或 `--no-gripper`。
 
 默认生成 `episode_<UUID>`；可以用 `--episode-id cup_0001` 指定未使用过的名称。再次运行相同命令会追加一个 episode，不覆盖已有数据。支持原有 `--config`、`--leader-config`、`--settings` 和夹爪控制参数。
@@ -113,9 +123,9 @@ openness = clip((measured_motor_7_rad - reference_rad[6])
 
 ## 写盘、故障与验证
 
-电机进程只把完整实际反馈放入最多 4096 条的队列，不等待 FK、Parquet 或视频编码。独立 state 进程按批写 Parquet；每个相机由独立系统 Python/GStreamer 进程采集和编码，不使用 leaky queue、videorate 或人为抽帧。设备/驱动在进入应用前丢失的帧无法恢复。
+电机进程只把完整实际反馈放入最多 4096 条的队列，不等待 FK、Parquet 或视频编码。独立 state 进程按批写 Parquet；每个相机由独立系统 Python/GStreamer 进程采集和编码，录制分支不使用 leaky queue、videorate 或人为抽帧。可选预览独立抽帧且允许丢帧。设备/驱动在进入应用前丢失的帧无法恢复。
 
-队列满、写盘错误、相机出错或无帧超时、子进程异常、硬件故障均使本次运行失败，保留 `.pending/<episode_id>/` 下的暂存文件，不向 `episodes.jsonl` 发布失败 episode。退出仍执行现有双臂位置保持流程。临时二进制时间戳和日志仅存在于暂存目录，成功发布前移除。
+采集队列满、写盘错误、相机出错或无帧超时、采集子进程异常、硬件故障均使本次运行失败，保留 `.pending/<episode_id>/` 下的暂存文件，不向 `episodes.jsonl` 发布失败 episode。可选 viewer 的退出或故障不触发此流程。退出仍执行现有双臂位置保持流程。临时二进制时间戳和日志仅存在于暂存目录，成功发布前移除。
 
 发布前要求四路 state 和所有相机均非空、流内时间戳非递减、轨迹时长为正，每路 MP4 均完整解码且帧数与索引一致。先完成 episode 文件，再更名到 `episodes/` 并以临时文件替换 `episodes.jsonl`；普通写入异常会回退目录。整个采集期间持有数据集文件锁，拒绝并发写同一数据集、重复 episode ID 和已有元数据/目录不一致。目录更名与元数据替换是两个文件系统操作，断电或 SIGKILL 落在两者之间仍可能留下孤立目录；再次采集会明确拒绝不一致的数据集，需要人工检查后恢复，不会静默覆盖。
 
@@ -126,5 +136,7 @@ python -m unittest discover -s tests -p 'test_rebot_recording.py' -v
 python -m unittest discover -s tests -p 'test_rebot_teleop.py'
 /usr/bin/python3 -m unittest discover -s tests -p 'test_webcam_viewer.py'
 ```
+
+预览相关测试覆盖开关默认关闭、三路画面与录制同时工作、关闭或杀死 viewer 后继续保存、viewer 启动失败继续采集，以及 socket 客户端完全不读数据时原生帧间隔和完整视频仍正常。
 
 采集测试使用真实 spawn 进程、虚拟 CAN/串口、GStreamer 测试画面及实际 H.264/Parquet 文件。它检查 FK 与 MuJoCo 一致、坐标轴及旋转列顺序、实际反馈与目标区分、非均匀/不同长度时间序列、统一原点、跨写入批次、指令范围、元数据追加、夹爪裁剪、队列溢出、数据集锁、写盘进程故障和电机故障不发布且保持，以及终端向所有子进程发送 Ctrl-C 后仍能收齐并发布完整 episode。测试不会连接实体机械臂或摄像头；实际设备的持续采集性能、时钟延迟和硬件几何还需实机核验。

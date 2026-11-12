@@ -11,11 +11,14 @@ from pathlib import Path
 import queue
 import re
 import signal
+import sys
 import struct
 import subprocess
 import time
 import uuid
 import xml.etree.ElementTree as ET
+
+from rebot_record_preview import RecordingViewer
 
 import numpy as np
 from scipy.spatial.transform import Rotation
@@ -42,6 +45,7 @@ class RecordingOptions:
     cameras: dict
     episode_id: str | None = None
     gripper_open_deg: float = 270.
+    camera_viewer: bool = False
 
     def validate(self):
         if not isinstance(self.instruction, str) or not self.instruction.strip():
@@ -210,7 +214,7 @@ def publish_feedback(samples, side, states):
 
 
 class CameraProcess:
-    def __init__(self, source, directory, name, *, python="/usr/bin/python3", test=False):
+    def __init__(self, source, directory, name, *, python="/usr/bin/python3", test=False, preview_socket=None):
         self.log = (Path(directory) / f"{name}.log").open("wb")
         self.process = None
         self.buffer, self.ready, self.done = b"", False, False
@@ -219,6 +223,8 @@ class CameraProcess:
                    "--timestamps", str(Path(directory) / f"{name}.timestamps")]
         if test:
             command.append("--test-source")
+        if preview_socket is not None:
+            command.extend(["--preview-socket", str(preview_socket)])
         try:
             self.process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                             stderr=self.log)
@@ -270,6 +276,7 @@ class RecordingSession:
         options.validate()
         schemas()  # Fail before connecting to or enabling hardware.
         self.options, self.cameras = options, []
+        self.viewer = None
         self.process = self.status = self.samples = self.lock = None
         self.writer_ready = self.writer_done = self.started = self.closed = False
         self.cameras_stopped = False
@@ -297,8 +304,14 @@ class RecordingSession:
                 args=(self.directory, self.samples, child_status, references, options.gripper_open_deg))
             self.process.start()
             child_status.close()
+            if options.camera_viewer:
+                try:
+                    self.viewer = RecordingViewer(options.cameras)
+                except Exception as exc:
+                    print(f"Camera preview unavailable; continuing recording: {exc}", file=sys.stderr)
             for name, source in options.cameras.items():
-                self.cameras.append(camera_factory(source, self.directory / "rgb", name))
+                preview = {"preview_socket": self.viewer.paths[name]} if self.viewer is not None else {}
+                self.cameras.append(camera_factory(source, self.directory / "rgb", name, **preview))
         except BaseException:
             self.close()
             raise
@@ -390,6 +403,8 @@ class RecordingSession:
         self.closed = True
         for camera in self.cameras:
             camera.close()
+        if self.viewer is not None:
+            self.viewer.close()
         if self.process is not None and self.process.pid is not None:
             if self.process.is_alive():
                 self.process.terminate()

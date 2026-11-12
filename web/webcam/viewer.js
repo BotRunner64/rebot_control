@@ -9,6 +9,7 @@ let focused = null;
 let closing = false;
 let timer = null;
 let failures = 0;
+let recordingPreview = false;
 
 function showNotice(message) {
   notice.textContent = message;
@@ -95,6 +96,7 @@ async function poll() {
     const response = await fetch("/api/cameras", {cache: "no-store", signal: AbortSignal.timeout(3000)});
     if (!response.ok) throw new Error("Viewer unavailable");
     const data = await response.json();
+    recordingPreview = !!data.recording;
     if (closing) return;
     if (failures > 0) {
       for (const card of cards.values()) {
@@ -131,13 +133,14 @@ async function stopViewer() {
     if (!response.ok) throw new Error("Could not close viewer");
     summary.textContent = "Viewer stopped";
     closeButton.textContent = "Closed";
-    showNotice("The viewer has closed. Restart webcam_viewer.py to preview again.");
+    showNotice(recordingPreview ? "Preview closed. Recording continues in the terminal."
+      : "The viewer has closed. Restart webcam_viewer.py to preview again.");
     for (const card of cards.values()) {
       card.image.removeAttribute("src");
       card.expand.disabled = true;
       card.root.querySelector(".status").dataset.state = "stopped";
       card.root.querySelector(".status-text").textContent = "Stopped";
-      placeholder(card, "Preview ended", "The camera has been released.");
+      placeholder(card, "Preview ended", recordingPreview ? "Recording continues." : "The camera has been released.");
     }
   } catch {
     closing = false;

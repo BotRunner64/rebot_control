@@ -4,6 +4,7 @@
 import argparse
 from contextlib import redirect_stdout
 import json
+import os
 from pathlib import Path
 import select
 import signal
@@ -67,16 +68,24 @@ def decode_frame_count(Gst, path, *, timeout=20.):
 
 
 class CameraRecorder:
-    def __init__(self, Gst, source, output, timestamps, *, test_source=False):
+    def __init__(self, Gst, source, output, timestamps, *, test_source=False, preview_socket=None):
         self.Gst, self.output = Gst, Path(output)
         self.pipeline = None
         self.timestamps = None
+        self.preview = None
+        self.preview_caps = None
         self.start_ns = self.stop_ns = self.previous_ns = None
         self.ready = False
         self.error = None
         self.count = 0
         self.last_frame_at = time.monotonic()
         try:
+            if preview_socket is not None:
+                try:
+                    from rebot_record_preview import PreviewPublisher
+                    self.preview = PreviewPublisher(preview_socket)
+                except Exception as exc:
+                    print(f"Camera preview disabled: {exc}", file=sys.stderr)
             self.timestamps = Path(timestamps).open("xb")
             source_description = "videotestsrc is-live=true name=camera" if test_source else "v4l2src name=camera"
             self.pipeline = Gst.parse_launch(
@@ -123,6 +132,14 @@ class CameraRecorder:
                 raise ValueError("Camera frame timestamp is outside its TIME segment.")
             timestamp = int(self.pipeline.get_base_time() + running_ns + self.clock_offset)
             self.last_frame_at = time.monotonic()
+            if self.preview is not None:
+                # Hand off only a buffer reference. Copying and socket I/O stay off this thread.
+                try:
+                    if self.preview_caps is None:
+                        self.preview_caps = pad.get_current_caps().to_string()
+                    self.preview.offer(buffer, self.preview_caps, self.last_frame_at)
+                except Exception:
+                    self.preview.stopping.set()
             if not self.ready:
                 self.ready = True
                 report("ready")
@@ -144,6 +161,7 @@ class CameraRecorder:
         Gst = self.Gst
         bus = self.pipeline.get_bus()
         finishing = False
+        commands = bytearray()
         deadline = None
         stopping = [False]
         old = {signal.SIGTERM: signal.signal(signal.SIGTERM, lambda *_: stopping.__setitem__(0, True))}
@@ -156,9 +174,15 @@ class CameraRecorder:
                 if stopping[0]:
                     raise RuntimeError("Camera recorder was interrupted.")
                 if not finishing and select.select([sys.stdin], [], [], 0)[0]:
-                    line = sys.stdin.readline()
-                    if not line:
+                    data = os.read(sys.stdin.fileno(), 65536)
+                    if not data:
                         raise RuntimeError("Recording supervisor disconnected.")
+                    commands.extend(data)
+                # Parse every complete command already read from the pipe. TextIO
+                # read-ahead must not hide a stop command from the next select().
+                while not finishing and b"\n" in commands:
+                    line, _, rest = commands.partition(b"\n")
+                    commands = bytearray(rest)
                     command = json.loads(line)
                     if command["command"] == "start" and self.start_ns is None:
                         self.start_ns = command["timestamp_ns"]
@@ -199,6 +223,8 @@ class CameraRecorder:
             self.pipeline.set_state(self.Gst.State.NULL)
         if self.timestamps is not None:
             self.timestamps.close()
+        if self.preview is not None:
+            self.preview.close()
 
 
 def main():
@@ -208,6 +234,7 @@ def main():
     parser.add_argument("--output", type=Path)
     parser.add_argument("--timestamps", type=Path)
     parser.add_argument("--test-source", action="store_true", help="Use a synthetic camera for offline tests")
+    parser.add_argument("--preview-socket", type=Path, help="Best-effort viewer socket")
     args = parser.parse_args()
     if not args.discover and any(value is None for value in (args.source, args.output, args.timestamps)):
         parser.error("recording requires --source, --output, and --timestamps")
@@ -222,7 +249,8 @@ def main():
                 sources = discover_cameras(Gst)
             report("cameras", sources=sources)
             return 0
-        recorder = CameraRecorder(Gst, args.source, args.output, args.timestamps, test_source=args.test_source)
+        recorder = CameraRecorder(Gst, args.source, args.output, args.timestamps, test_source=args.test_source,
+                                  preview_socket=args.preview_socket)
         recorder.run()
         return 0
     except Exception as exc:

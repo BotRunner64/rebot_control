@@ -47,7 +47,7 @@ class PreviewHandler(BaseHTTPRequestHandler):
                 self.respond(200, (ASSET_ROOT / file).read_bytes(), mime)
             elif path == "/api/cameras":
                 cameras = [{"id": index, **camera.snapshot()} for index, camera in enumerate(viewer.cameras)]
-                self.respond(200, json.dumps({"cameras": cameras}).encode())
+                self.respond(200, json.dumps({"cameras": cameras, "recording": viewer.recording}).encode())
             elif match := re.fullmatch(r"/streams/(\d+)\.mjpg", path):
                 index = int(match[1])
                 if index >= len(viewer.cameras):
@@ -95,10 +95,11 @@ class PreviewHandler(BaseHTTPRequestHandler):
 
 
 class WebcamServer:
-    def __init__(self, cameras, request_stop, *, port=8080):
+    def __init__(self, cameras, request_stop, *, port=8080, recording=False):
         if type(port) is not int or not 0 <= port <= 65535:
             raise ValueError("Webcam viewer port must be between 0 and 65535.")
         self.cameras, self.request_stop = cameras, request_stop
+        self.recording = recording
         self.stopping = threading.Event()
         for candidate in range(port, 65536):
             try:

@@ -21,6 +21,8 @@ def main(argv=None):
     parser.add_argument("--instruction", default="__pending__", help="Task instruction (default: __pending__)")
     parser.add_argument("--camera", action="append", metavar="[ID=]DEVICE",
                         help="Camera device with optional name (default: auto-detect all)")
+    parser.add_argument("--camera-viewer", action="store_true",
+                        help="Open a best-effort camera preview without blocking recording")
     parser.add_argument("--episode-id", help="Unique episode name (default: generated UUID)")
     parser.add_argument("--config", type=Path, default=CONFIG, help="Follower bindings YAML")
     parser.add_argument("--leader-config", type=Path, default=LEADER_CONFIG)
@@ -39,7 +41,7 @@ def main(argv=None):
                                     capture_output=True, text=True, check=True, timeout=15.)
             cameras = json.loads(result.stdout)["sources"]
         recording = RecordingOptions(args.dataset, args.instruction, parse_cameras(cameras),
-                                     args.episode_id, args.record_gripper_open_deg)
+                                     args.episode_id, args.record_gripper_open_deg, camera_viewer=args.camera_viewer)
         recording.validate()
         teleop(config=args.config, leader_config=args.leader_config, settings_path=args.settings,
                side="both", gripper=True, gripper_open_deg=args.gripper_open_deg,
