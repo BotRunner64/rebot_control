@@ -25,7 +25,7 @@ uv pip install --python "$CONDA_PREFIX/bin/python" --torch-backend cpu -r requir
 uv pip install --python "$CONDA_PREFIX/bin/python" --no-deps lerobot==0.4.4
 ```
 
-这里有意只安装 LeRobot 的数据集相关依赖，`--no-deps` 避免安装与离线转换无关的遥操、硬件输入和策略依赖。`requirements-lerobot.txt` 不是完整 OpenPI 训练环境；写入和读取接口固定使用 `lerobot==0.4.4`。没有 `uv` 时，也可在激活的 conda 环境中先用 pip 安装 CPU 版 `torch==2.7.1`、`torchvision==0.22.1`，再依次执行 `python -m pip install -r requirements-lerobot.txt` 与 `python -m pip install --no-deps lerobot==0.4.4`。
+这里有意只安装 LeRobot 的数据集相关依赖，`--no-deps` 避免安装与离线转换无关的遥操、硬件输入和策略依赖。写入和读取接口固定使用 `lerobot==0.4.4`。没有 `uv` 时，也可在激活的 conda 环境中先用 pip 安装 CPU 版 `torch==2.7.1`、`torchvision==0.22.1`，再依次执行 `python -m pip install -r requirements-lerobot.txt` 与 `python -m pip install --no-deps lerobot==0.4.4`。
 
 `--repo-id` 只是数据集身份，不会创建远程仓库或上传数据。输出必须是不存在的新目录，并且与源目录互不嵌套。`datasets` 软链接指向数据盘，以上输入、输出都会使用 `/mnt/data/rebot_data`。
 
@@ -63,7 +63,7 @@ uv pip install --python "$CONDA_PREFIX/bin/python" --no-deps lerobot==0.4.4
  right_gripper_openness]
 ```
 
-保持位置单位米、旋转矩阵按列展平、各臂自己的基座坐标系，以及夹爪 `0=闭合，1=张开`。源位姿 float64 转为训练常用的 float32，除精度转换外不修改数值。数据 EEF 与现有末端控制入口的轴向差异仍按[采集源契约](recording.md)处理。
+保持位置单位米、旋转矩阵按列展平、各臂自己的基座坐标系，以及夹爪 `0=闭合，1=张开`。源位姿 float64 转为训练常用的 float32，除精度转换外不修改数值。模型原生 EEF、采集和末端控制统一使用[采集源契约](recording.md)中的坐标定义，无额外换轴。
 
 相机名、分辨率和视野保持原样；视频根据选中的帧重新编码为 H.264，统一 30 FPS，使用固定版本 LeRobot 的编码设置，会引入有损压缩。同步图像直接送入各路并行编码线程，不生成中间 PNG 文件。每路队列最多缓存 4 帧，编码跟不上时生产端等待，不丢帧。该适配使用固定版本 `lerobot==0.4.4` 的内部编码接口；升级 LeRobot 时需要重新核对接口并运行测试。输出仍由官方写入器保存并经过完整校验。
 
@@ -77,17 +77,7 @@ uv pip install --python "$CONDA_PREFIX/bin/python" --no-deps lerobot==0.4.4
 
 所有内容先写到输出目录旁的隐藏临时目录，验证通过后整体更名。使用输出文件锁防止同一目标并发转换；普通异常会清理临时目录，不发布半成品，源数据不变。强制杀死进程可能留下隐藏临时目录。
 
-## OpenPI 接入
-
-导出的是标准 LeRobot v3 数据集；训练端需要支持 v3 的读取器和本机器人的 26 维 EEF 输入/输出适配。官方 OpenPI 当前主分支的加载器仍使用 `lerobot.common.datasets...` 路径并固定旧 LeRobot 依赖，不能仅替换数据集路径就假定支持 v3。请在实际 OpenPI checkout 中核对依赖与接口；升级时还需适配任务表、episode 边界等相关 API。参考 [OpenPI 依赖](https://github.com/Physical-Intelligence/openpi/blob/main/pyproject.toml)及[加载器](https://github.com/Physical-Intelligence/openpi/blob/main/src/openpi/training/data_loader.py)。本脚本不修改外部 OpenPI 安装。
-
-接入时需要保持以下约定：
-
-- 映射 `observation.state` 到 OpenPI 的 `state`，`action` 到 `actions`，instruction/task 到 `prompt`；按视角映射相机。
-- 使用自己的 EEF 适配，不直接套用 ALOHA 的 14 维关节角、方向翻转或夹爪转换。绝对旋转矩阵不能直接套用逐元素减法的关节 delta 变换。
-- 动作块可以由读取器按 `delta_timestamps={"action": [i / 30 for i in range(action_horizon)]}` 构造，边界 padding 由读取器处理。
-- 使用实际训练变换后的数据重新运行 OpenPI 的 `compute_norm_stats.py`；LeRobot 的 `meta/stats.json` 不替代 OpenPI 配置所需的归一化资产。
-- 部署时按 30 Hz 的动作间隔执行，保持相同特征顺序、位姿坐标与夹爪含义。需要将模型预测的旋转矩阵恢复为合法旋转，再交给现有控制接口。
+## 读取数据
 
 转换结果的本地读取示例：
 

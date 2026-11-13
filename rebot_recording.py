@@ -27,8 +27,6 @@ from scipy.spatial.transform import Rotation
 MODEL_PATH = Path(__file__).with_name("models") / "rebot_rs.xml"
 CAMERA_SCRIPT = Path(__file__).with_name("rebot_record_camera.py")
 SIDES = ("left", "right")
-# Columns express dataset axes in gripper_mount: +X=+Z, +Y=-Y, +Z=+X.
-MOUNT_FROM_EEF = np.array([[0., 0., 1.], [0., -1., 0.], [1., 0., 0.]])
 BATCH_SIZE = 512
 
 
@@ -67,7 +65,7 @@ class RecordingOptions:
 
 
 class ForwardKinematics:
-    """Compute the mounting pose from the MJCF chain, without rendering or IK."""
+    """Read the model's contract EEF directly, without rendering or an axis adapter."""
 
     def __init__(self, path=MODEL_PATH):
         root = ET.parse(path).getroot()
@@ -112,7 +110,6 @@ class ForwardKinematics:
                 motion[:3, 3] = origin - motion[:3, :3] @ origin
                 result = result @ motion
                 index += 1
-        result[:3, :3] = result[:3, :3] @ MOUNT_FROM_EEF
         return np.concatenate((result[:3, 3], result[:3, :3].ravel(order="F")))
 
 

@@ -178,12 +178,17 @@ class CameraPreview:
         return self.runtime.Gst.FlowReturn.OK
 
     def wait_frame(self, sequence, timeout=1.):
+        sample = self.wait_sample(sequence, timeout)
+        return None if sample is None else sample[:2]
+
+    def wait_sample(self, sequence, timeout=1.):
+        """Return a coherent JPEG and acquisition timestamp."""
         with self.condition:
             self.condition.wait_for(
                 lambda: self.sequence != sequence or self.failed or self.closed, timeout)
             if self.failed or self.closed or self.sequence == sequence:
                 return None
-            return self.sequence, self.frame
+            return self.sequence, self.frame, self.last_frame_at
 
     def snapshot(self):
         with self.condition:

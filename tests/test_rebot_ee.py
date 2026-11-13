@@ -55,7 +55,7 @@ class KinematicsTests(unittest.TestCase):
         ik.solve(target)
         np.testing.assert_allclose(ik.q, np.zeros(6), atol=1e-9)
 
-    def test_default_tcp_is_the_mounting_face_with_link6_axes(self):
+    def test_default_tcp_is_the_mounting_face_with_contract_axes(self):
         ik = CartesianIK(TEST_START)
         for q in (SIM_START, TEST_START, TEST_START + np.radians([5., 4., -3., 2., 1., 30.])):
             ik.update_display(q)
@@ -63,7 +63,9 @@ class KinematicsTests(unittest.TestCase):
             rotation = flange.xmat.reshape(3, 3)
             pose = ik.pose(q)
             np.testing.assert_allclose(pose[:3, 3], flange.xpos + rotation @ [0., 0., .009], atol=1e-12)
-            np.testing.assert_allclose(pose[:3, :3], rotation, atol=1e-12)
+            np.testing.assert_allclose(pose[:3, 0], rotation[:, 2], atol=1e-12)
+            np.testing.assert_allclose(pose[:3, 1], -rotation[:, 1], atol=1e-12)
+            np.testing.assert_allclose(pose[:3, 2], rotation[:, 0], atol=1e-12)
 
     def test_changing_downstream_gripper_geometry_preserves_the_ee_frame(self):
         original = CartesianIK(TEST_START).pose()

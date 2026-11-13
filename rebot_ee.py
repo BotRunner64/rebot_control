@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Control one reBot RS gripper mounting frame with Mink IK and native MIT PD."""
+"""Control one reBot RS end-effector frame with Mink IK and native MIT PD."""
 
 import argparse
 from contextlib import contextmanager, nullcontext
@@ -226,7 +226,7 @@ def main(argv=None):
                         help="Translation in base-frame meters from startup TCP; preserve startup orientation")
     parser.add_argument("--start-joints", type=float, nargs=6, help="Simulation initial J1-J6 in degrees")
     parser.add_argument("--tcp-offset", type=float, nargs=3, default=(0., 0., 0.),
-                        help="TCP position in gripper_mount axes, in meters; default is the fixed mounting face center")
+                        help="TCP offset in EEF axes (+X approach, +Z palm back), in meters; default is zero")
     parser.add_argument("--duration", type=float, help="Stop after this many seconds; required with --headless")
     parser.add_argument("--headless", action="store_true", help="No viewer; requires a fixed target and duration")
     parser.add_argument("--port", type=int, default=8080, help="Local web viewer port")

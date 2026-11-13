@@ -73,8 +73,8 @@
                   <joint name="joint6" type="hinge" axis="0 0 -1" limited="true" range="-3.14 3.14" damping="2.0" frictionloss="0.1" />
                   <inertial pos="0.000018 0 0.0043481" mass="0.03" fullinertia="0.0000044227 0.0000043719 0.000008543 0 0.0000000002 0" />
                   <geom pos="0 0 0" group="1" contype="0" conaffinity="0" material="rs_motor_black_mat" type="mesh" mesh="link6" />
-                  <!-- Fixed mounting face: link6's front surface, independent of the gripper and fingertips. -->
-                  <body name="gripper_mount" pos="0 0 0.009">
+                  <!-- Contract EEF at the fixed mounting face: +X approach, +Z palm back, +Y = +Z cross +X. -->
+                  <body name="gripper_mount" pos="0 0 0.009" quat="0 0.7071067811865476 0 0.7071067811865476">
                     <site name="tcp" pos="0 0 0" size="0.01" rgba="1 0 0 0" group="2" />
                   </body>
                   <body name="gripper_end" pos="0 0 0.16621" quat="-0.0000026 0.7071055 0.0000026 0.7071081">

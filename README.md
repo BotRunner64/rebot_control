@@ -116,7 +116,7 @@ python rebot_process.py --dataset datasets/cup --output datasets/cup_processed
 
 打开 `http://127.0.0.1:8090`，整段录制统一填写 instruction，相机名称直接在画面角落修改。首次打开自动拆分一次，随后直接拖动时间轴边界复核 reset 排除范围；刷新保留手动结果。支持独立草稿、撤销和 `--export` 命令行批处理；原始数据保持不变，输出必须使用新目录。完整说明见 [连续采集与离线处理](docs/processing.md)。
 
-处理完成后，在 `rebot_control` conda 环境运行 `python rebot_to_lerobot.py --dataset datasets/cup_processed --output datasets/cup_lerobot_v3 --repo-id local/cup` 导出 **30 FPS LeRobot v3** 数据集。脚本按原始时间戳最近邻对齐双臂 EEF、夹爪与视频，保留 26 维位姿/开合表示，以下一同步时刻的实测状态作为动作目标。LeRobot 已加入项目依赖；完整安装、同步规则及 OpenPI 接入要求见 [LeRobot v3 转换说明](docs/lerobot.md)。
+处理完成后，在 `rebot_control` conda 环境运行 `python rebot_to_lerobot.py --dataset datasets/cup_processed --output datasets/cup_lerobot_v3 --repo-id local/cup` 导出 **30 FPS LeRobot v3** 数据集。脚本按原始时间戳最近邻对齐双臂 EEF、夹爪与视频，保留 26 维位姿/开合表示，以下一同步时刻的实测状态作为动作目标。LeRobot 已加入项目依赖；完整安装、同步规则及读取示例见 [LeRobot v3 转换说明](docs/lerobot.md)。
 
 ### Star Arm 遥操实体 reBot
 
@@ -254,7 +254,7 @@ Web viewer 默认绑定 `127.0.0.1:8080`，端口占用时向后选择可用端�
 
 `--pose x y z roll pitch yaw` 使用单臂底座坐标系，旋转为固定轴 XYZ 欧拉角（`R = Rz(yaw) Ry(pitch) Rx(roll)`），不是双臂场景的世界坐标。`--offset dx dy dz` 相对本次启动实测位置、沿基座轴平移并保持启动朝向。仿真初始关节角默认为 `[0,0,0,0,0,0]°`，对应模型参考零姿态，可用 `--start-joints` 改变；实体只接受实测启动姿态，不接受该参数，也不会自动运动到仿真零姿态。
 
-默认 EE/TCP 现定义在夹爪安装接口中心，即 MJCF 的固定坐标系 `gripper_mount` 原点：相对 `link6` 平移 `[0,0,0.009] m`，朝向与 `link6` 一致。9 mm 对应 CAD 安装盘前表面，模型夹爪后端也位于此处；这是模型定义，尚未用实物重新标定。Z 轴沿安装面法线朝夹爪，X/Y 轴沿用安装盘的 `link6` 固定方向，不随指尖、夹爪开口或夹爪网格改变。IK、Web 操作柄、数值位姿和末端误差均使用此参考点。`--tcp-offset x y z` 默认为零，现在表示在 `gripper_mount` 坐标系中的附加位置偏移，单位 m，朝向保持不变；混合训练时应保持零偏移并统一各平台的安装坐标轴、位姿表达和预测时间间隔。
+默认 EE/TCP 为模型的 `gripper_mount`：位于夹爪安装面中心，相对 `link6` 平移 `[0,0,0.009] m`，+X 为接近方向、+Z 为掌背方向。模型、IK、Web 操作柄和采集共用该坐标，不随夹爪开合或指尖更换改变；历史导出位姿数值保持不变。`--tcp-offset x y z` 表示 EEF 局部轴下的附加位置偏移，单位 m，默认为零。完整轴向定义见[采集源契约](docs/recording.md#安装接口与-eef-轴向)。
 
 这是参考系语义变更：旧版默认使用 `gripper_end` 原点，其相对 `link6` 的平移为 `[0,0,0.16621] m`，朝向也不同。旧的绝对 `--pose`、历史 EE 状态/目标以及非零 `--tcp-offset` 不能直接当成新的安装接口位姿使用，需按完整刚体变换转换。更换 fingertip 无需重新定义默认 EE；指尖接触位置和工具外形差异仍需由视觉或工具条件学习。
 
@@ -273,6 +273,25 @@ EE 路径参考 [YAM Kinematics](https://github.com/i2rt-robotics/i2rt/blob/main
 ```bash
 python -m unittest discover -s tests -p 'test_rebot_ee*.py' -v
 ```
+
+### 远端策略控制 CLI
+
+`rebot_policy.py` 保留原来的启动方式，负责相机观测、远端请求、异步动作调度和双臂控制。模型加载、权重和推理服务实现放在服务端仓库；本仓库仅使用已安装的轻量客户端 SDK 通信和缩放图像。控制环境需安装 `ee`、`policy` 可选依赖。
+
+```bash
+conda activate rebot_control
+python rebot_policy.py --host 127.0.0.1 --port 8000 \
+  --instruction "YOUR_TRAINING_INSTRUCTION" --hardware \
+  --camera top=/dev/video4 \
+  --camera left_wrist=/dev/video0 \
+  --camera right_wrist=/dev/video2
+```
+
+相机设备按实物填写，instruction 使用训练任务原文。去掉 `--hardware` 运行运动学仿真；`--mock-cameras` 可替代相机参数用于仿真联调，实机禁止合成相机和 mock 策略。服务端启动与模型配置见服务端仓库。
+
+控制端按 30 Hz 执行 `(50,26)` 的绝对 EEF 动作块，沿用[采集契约](docs/recording.md)的顺序、坐标和夹爪开度。后台每 16 步提前请求下一块（`--replan-steps`），等待期间继续执行当前块，并按观测时间跳过已过期的动作。每臂 CAN 独立请求 250 Hz，沿用现有 IK、重力补偿、夹爪总力矩限幅和跟踪误差检查；自碰撞时保留上一有效双臂目标。
+
+Space、Esc、Q、Ctrl-C 停止，`--duration 10` 可限制运行时长。请求超时、相机/反馈过期、非法动作或 CAN 故障也会停止，退出尝试当前位置原生保持并保持使能。`--request-timeout` 默认 1 秒，`--camera-max-age` 默认 0.25 秒，`--camera-max-skew` 默认 0.10 秒；`--gripper-open-deg` 默认 270°，应与采集时一致。
 
 ### 手动引导与位置保持（Hand Guiding）
 

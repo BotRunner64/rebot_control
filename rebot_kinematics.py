@@ -11,6 +11,7 @@ from rebot_teleop import JOINT_LIMITS_DEG
 
 
 MODEL_PATH = Path(__file__).with_name("models") / "rebot_rs.xml"
+# Native EEF axes: +X approach, +Z palm back, +Y = +Z cross +X.
 EE_FRAME = "gripper_mount"
 JOINT_NAMES = tuple(f"joint{i}" for i in range(1, 7))
 SIM_START = np.zeros(6)
@@ -43,7 +44,7 @@ def validate_transform(value):
 
 
 def build_model(lower, upper, tcp_offset=(0., 0., 0.)):
-    """Fix visual fingers and apply a TCP offset in the fixed mounting frame."""
+    """Fix visual fingers and apply a TCP offset in the EEF frame."""
     import mujoco
 
     lower, upper = vector6(lower, "Lower limits"), vector6(upper, "Upper limits")
