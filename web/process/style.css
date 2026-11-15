@@ -45,7 +45,7 @@ main { flex: 1; display: flex; flex-direction: column; min-height: 0; padding: 1
 #ruler span:last-child { transform: translateX(-100%); }
 #ruler span::after { content: ""; position: absolute; height: 4px; width: 1px; background: #d5deea; top: 17px; left: 50%; }
 #timeline-clips { position: relative; min-height: 66px; background: #f3f6fa; border-radius: 5px; cursor: crosshair; touch-action: none; }
-.timeline-clip { position: absolute; min-width: 2px; height: 64px; top: 1px; border: 1px solid #d2ddeb; border-radius: 5px; background: #e9eff7; text-align: left; padding: 10px; overflow: hidden; white-space: nowrap; cursor: crosshair; }
+.timeline-clip { position: absolute; min-width: 2px; height: 64px; top: 1px; border: 1px solid #9fb4d1; border-radius: 5px; background: #e9eff7; text-align: left; padding: 10px; overflow: hidden; white-space: nowrap; cursor: crosshair; }
 .timeline-clip:hover { background: #dce8f9; }
 .timeline-clip.selected { background: #d9e8ff; border-color: #5d9afa; box-shadow: inset 0 0 0 1px #5d9afa; color: #135cc8; }
 .clip-title { font-size: 11px; font-weight: 550; pointer-events: none; }

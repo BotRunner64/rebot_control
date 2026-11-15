@@ -269,7 +269,7 @@ function renderTimeline() {
     const button = element("button", `timeline-clip${item === selected ? " selected" : ""}`);
     const title = `Episode ${String(index + 1).padStart(2, "0")}`;
     button.append(element("span", "clip-title", String(index + 1).padStart(2, "0")));
-    button.title = `${item.id}: ${time(item.start_ns)} – ${time(item.end_ns)}. Double-click to cut.`;
+    button.title = `${item.id}: ${time(item.start_ns)} – ${time(item.end_ns)}. Drag an edge to trim; Shift-drag moves the cut shared with the next episode. Double-click to cut.`;
     button.setAttribute("aria-label", title);
     button.dataset.episodeId = item.id;
     button.dataset.lane = lane;
@@ -312,7 +312,7 @@ function renderSelection() {
       if (!["ArrowLeft", "ArrowRight"].includes(event.key)) return;
       event.preventDefault(); event.stopPropagation(); checkpoint();
       const value = adjacentFrame(item[`${side}_ns`], event.key === "ArrowLeft" ? -1 : 1);
-      if (isGap) moveGapBoundary(item, side, value); else moveBoundary(item, side, value);
+      if (isGap) moveGapBoundary(item, side, value); else moveBoundary(item, side, value, event.shiftKey);
       $("timeline-clips").querySelector(`[data-side="${side}"]`)?.focus({preventScroll: true});
     };
     track.append(handle);
@@ -356,17 +356,20 @@ function cutAt(value, preferred) {
   changed(); selectEpisode(right, boundary);
   notice("");
 }
-function moveBoundary(item, side, value) {
+function moveBoundary(item, side, value, linked = false) {
+  // An edge trims only its own episode: shrinking leaves an excluded range, and
+  // growing stops at the neighbor. `linked` (Shift) also moves an adjoining
+  // neighbor's edge, which slides the cut between two back-to-back episodes.
   const items = entries(), index = items.indexOf(item), previous = items[index - 1], next = items[index + 1];
   const old = item[`${side}_ns`];
   if (side === "start") {
-    const linked = previous && previous.end_ns === old;
+    linked &&= !!previous && previous.end_ns === old;
     const minimum = linked ? previous.start_ns + 1 : previous && previous.end_ns <= old ? previous.end_ns : 0;
     value = Math.max(minimum, Math.min(item.end_ns - 1, value));
     if (linked) previous.end_ns = value;
     item.start_ns = value;
   } else {
-    const linked = next && next.start_ns === old;
+    linked &&= !!next && next.start_ns === old;
     const maximum = linked ? next.end_ns - 1 : next && next.start_ns >= old ? next.start_ns : session.duration_ns;
     value = Math.min(maximum, Math.max(item.start_ns + 1, value));
     if (linked) next.start_ns = value;
@@ -387,7 +390,7 @@ $("timeline-content").onpointermove = (event) => {
   if (drag.side === "playhead") { seek(timelineValue(event.clientX)); return; }
   if (!drag.checkpointed) { checkpoint(); drag.checkpointed = true; }
   const value = snap(timelineValue(event.clientX));
-  if (drag.gap) moveGapBoundary(drag.item, drag.side, value); else moveBoundary(drag.item, drag.side, value);
+  if (drag.gap) moveGapBoundary(drag.item, drag.side, value); else moveBoundary(drag.item, drag.side, value, event.shiftKey);
 };
 function endDrag(event) {
   if (!drag || event.pointerId !== drag.pointer) return;
