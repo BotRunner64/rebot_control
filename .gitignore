@@ -14,9 +14,7 @@ venv/
 *.local.yaml
 
 # Run artifacts
-calibration_runs/
-motion_runs/
-trajectory_runs/
+/runs/
 /datasets
 
 # Editor / OS

@@ -1,0 +1,23 @@
+# Shared control settings. Experimental, unloaded, upright B601-RS defaults.
+# Loaded by every hardware command; see rebot/settings.py for the accepted ranges.
+
+# --- Loop timing and safety (all controllers) ---
+rate_hz: 50                    # single-threaded loops: guide, home, identify
+max_sample_gap_s: 0.10         # abort when consecutive samples are further apart
+max_feedback_age_s: 0.08       # abort instead of commanding from older feedback
+max_tracking_error_deg: 45.0   # target vs. measured on any J1-J6; gripper excluded
+
+# --- Gravity feedforward and per-joint torque budget (J1-J6) ---
+torque_limit_nm: [3, 15, 10, 3, 2, 1]
+gravity_scale: [1, 0.98, 0.98, 1, 1, 1]
+
+# --- Hand guiding ---
+hold_kp: [6, 15, 12, 4, 3, 2]
+damping: [0.5, 1.5, 1.2, 0.4, 0.3, 0.2]
+startup_duration_s: 2.0        # keep the initial pose before allowing drag release
+hold_ramp_s: 0.3
+velocity_filter_s: 0.04
+still_speed_rad_s: 0.03
+release_speed_rad_s: 0.12
+release_error_rad: 0.035
+settle_duration_s: 0.5
