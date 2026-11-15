@@ -27,7 +27,7 @@ dependencies = [
 [project.optional-dependencies]
 ee = ["mink>=1.4.0,<2", "quadprog>=0.1.13"]
 recording = ["pyarrow>=17"]
-policy = ["openpi-client>=0.1.0"]
+policy = ["msgpack>=1.0"]
 
 [tool.uv]
 package = false

@@ -112,7 +112,8 @@ class Robot:
             pose = self.iks[side].pose(q[:6])
             values.extend((*pose[:3, 3], *pose[:3, :3].ravel(order="F"), openness))
             times.append(acquired_at)
-        return {"state": list(map(float, values)), "observed_at": min(times)}
+        return {"state": list(map(float, values)), "observed_at": min(times),
+                "acquired_at": dict(zip(SIDES, times))}
 
     def command(self, value):
         values = np.asarray(value, dtype=float)

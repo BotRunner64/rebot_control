@@ -13,66 +13,97 @@ import numpy as np
 
 HERE = Path(__file__).resolve().parent
 
-ACTION_HZ = 30
-ACTION_HORIZON = 50
-METADATA = {"action_format": "absolute_eef26", "rotation_order": "column_major",
-            "control_frequency": ACTION_HZ, "action_horizon": ACTION_HORIZON}
+CONTROL_HZ = 30
+SIDES = ("left", "right")
+STREAMS = ("left_eef", "right_eef", "left_gripper", "right_gripper")
 
 
 def connect_policy(host, port, timeout):
-    from openpi_client.websocket_client_policy import WebsocketClientPolicy
+    from rebot_policy_link import PolicyClient
 
-    policy = WebsocketClientPolicy(host, port, timeout=timeout)
+    client = PolicyClient(host, port, timeout=timeout)
     try:
-        metadata = policy.get_server_metadata()
-        if not isinstance(metadata, dict):
-            raise ValueError("Policy metadata must be a dictionary.")
-        for key, value in METADATA.items():
-            if metadata.get(key) != value:
-                raise ValueError(f"Policy metadata must declare {key}={value!r}; "
-                                 "connect to a server using the matching robot action contract.")
-        return policy
+        unknown = set(client.metadata["state"]) - set(STREAMS)
+        if unknown:
+            raise ValueError(f"Policy requires state streams this robot does not provide: {sorted(unknown)}.")
+        return client
     except BaseException:
-        policy.close()
+        client.close()
         raise
 
 
-def validate_actions(value):
-    actions = np.asarray(value, dtype=float)
-    if actions.shape != (ACTION_HORIZON, 26) or not np.all(np.isfinite(actions)):
-        raise ValueError("Policy actions must be finite absolute states with shape (50, 26).")
-    for offset in (0, 13):
-        rotation = actions[:, offset + 3:offset + 12].reshape(-1, 3, 3).swapaxes(-1, -2)
-        if (not np.allclose(rotation.swapaxes(-1, -2) @ rotation, np.eye(3), atol=1e-3, rtol=0)
-                or not np.allclose(np.linalg.det(rotation), 1., atol=1e-3, rtol=0)):
-            raise ValueError("Policy rotations must be proper column-major rotation matrices.")
-    actions = actions.copy()
-    actions[:, [12, 25]] = np.clip(actions[:, [12, 25]], 0., 1.)
-    return actions
+def build_observation(snapshot, frames, instruction):
+    """Latest rows of every stream, in the recording contract's names, units and columns."""
+    def ns(seconds):
+        return round(seconds * 1e9)
+
+    state = {}
+    for side, row in zip(SIDES, np.asarray(snapshot["state"], dtype=float).reshape(2, 13)):
+        stamp = [ns(snapshot["acquired_at"][side])]
+        state[f"{side}_eef"] = {"timestamp_ns": stamp, "pose": [row[:12].tolist()]}
+        state[f"{side}_gripper"] = {"timestamp_ns": stamp, "openness": [float(row[12])]}
+    return {"timestamp_ns": ns(snapshot["observed_at"]), "instruction": instruction, "state": state,
+            "rgb": {name: {"timestamp_ns": [ns(stamp)], "jpeg": [jpeg]}
+                    for name, (jpeg, stamp) in frames.items()}}
+
+
+def parse_actions(reply):
+    """Action reply -> {stream: (seconds, values)}; future rows of the recorded state streams."""
+    tables = reply.get("state") if isinstance(reply, dict) else None
+    if not isinstance(tables, dict) or set(tables) != set(STREAMS):
+        raise ValueError(f"Policy actions must contain exactly the state streams {list(STREAMS)}.")
+    chunk = {}
+    for name in STREAMS:
+        column = "pose" if name.endswith("_eef") else "openness"
+        times = np.asarray(tables[name]["timestamp_ns"], dtype=np.int64) / 1e9
+        values = np.asarray(tables[name][column], dtype=float)
+        if (not len(times) or values.shape != ((len(times), 12) if column == "pose" else (len(times),))
+                or not np.all(np.isfinite(values)) or np.any(np.diff(times) <= 0)):
+            raise ValueError(f"Policy stream {name} needs finite {column} rows at strictly increasing times.")
+        if column == "pose":
+            rotation = values[:, 3:].reshape(-1, 3, 3).swapaxes(-1, -2)
+            if (not np.allclose(rotation.swapaxes(-1, -2) @ rotation, np.eye(3), atol=1e-3, rtol=0)
+                    or not np.allclose(np.linalg.det(rotation), 1., atol=1e-3, rtol=0)):
+                raise ValueError("Policy rotations must be proper column-major rotation matrices.")
+        else:
+            values = np.clip(values, 0., 1.)
+        chunk[name] = times, values
+    return chunk
 
 
 class ActionTimeline:
-    """Row k is the target for observation time + (k + 1) / 30 seconds."""
+    """Each stream's active target is its first row stamped later than now."""
 
     def __init__(self):
-        self.actions = None
+        self.chunk = None
         self.observed_at = None
 
-    def accept(self, actions, observed_at, now):
-        actions = validate_actions(actions)
-        if not math.isfinite(observed_at) or not 0 <= now - observed_at < ACTION_HORIZON / ACTION_HZ:
+    def accept(self, chunk, observed_at, now, replan_after=0.):
+        ends = min(times[-1] for times, _ in chunk.values())
+        if not math.isfinite(observed_at) or any(times[0] <= observed_at for times, _ in chunk.values()):
+            raise ValueError("Policy targets must be stamped later than their observation.")
+        if not observed_at <= now < ends:
             raise TimeoutError("Returned action chunk is already expired or has an invalid timestamp.")
+        if ends <= observed_at + replan_after:
+            raise ValueError("Action chunk ends before the next replanning time.")
         if self.observed_at is not None and observed_at <= self.observed_at:
             raise ValueError("An older observation cannot replace the active action chunk.")
-        self.actions, self.observed_at = actions, observed_at
+        self.chunk, self.observed_at = chunk, observed_at
 
     def sample(self, now):
-        if self.actions is None:
+        if self.chunk is None:
             return None
-        index = math.floor((now - self.observed_at) * ACTION_HZ)
-        if not 0 <= index < ACTION_HORIZON:
-            raise TimeoutError("Action buffer exhausted before the next inference arrived.")
-        return self.actions[index].copy(), index
+        target, rows = np.empty(26), {}
+        for name, (times, values) in self.chunk.items():
+            rows[name] = int(np.searchsorted(times, now, side="right"))
+            if rows[name] >= len(times):
+                raise TimeoutError("Action buffer exhausted before the next inference arrived.")
+            offset = SIDES.index(name.rsplit("_", 1)[0]) * 13
+            if name.endswith("_eef"):
+                target[offset:offset + 12] = values[rows[name]]
+            else:
+                target[offset + 12] = values[rows[name]]
+        return target, rows["left_eef"]
 
 
 class InferenceWorker:
@@ -127,10 +158,9 @@ class InferenceWorker:
                     break
                 observation, observed_at = self.observe()
                 began = time.monotonic()
-                reply = self.client.infer(observation)
-                actions = validate_actions(reply["actions"])
+                chunk = parse_actions(self.client.infer(observation))
                 with self.lock:
-                    self.result = actions, observed_at, time.monotonic() - began
+                    self.result = chunk, observed_at, time.monotonic() - began
         except Exception as exc:
             if self.done.is_set():
                 return
@@ -155,11 +185,11 @@ class InferenceWorker:
 def control_loop(robot, client, observe, stop, *, duration=None, replan_steps=16, keys=None):
     from rebot_teleop_runtime import LoopTiming
 
-    if (type(replan_steps) is not int or not 1 <= replan_steps < ACTION_HORIZON
+    if (type(replan_steps) is not int or replan_steps < 1
             or (duration is not None and (not math.isfinite(duration) or duration <= 0))):
         raise ValueError("Invalid duration or replanning interval.")
     timeline = ActionTimeline()
-    timing = LoopTiming("policy-target", ACTION_HZ)
+    timing = LoopTiming("policy-target", CONTROL_HZ)
     started = next_request = time.monotonic()
     requests = commands = 0
     with InferenceWorker(client, observe, stop) as inference:
@@ -173,12 +203,12 @@ def control_loop(robot, client, observe, stop, *, duration=None, replan_steps=16
                 break
             result = inference.take()
             if result is not None:
-                actions, observed_at, latency = result
+                chunk, observed_at, latency = result
                 now = time.monotonic()
-                timeline.accept(actions, observed_at, now)
-                next_request = observed_at + replan_steps / ACTION_HZ
+                timeline.accept(chunk, observed_at, now, replan_steps / CONTROL_HZ)
+                next_request = observed_at + replan_steps / CONTROL_HZ
                 print(f"Policy chunk {requests}: inference={latency * 1000:.1f} ms; "
-                      f"skip={math.floor((now - observed_at) * ACTION_HZ)} elapsed rows.", flush=True)
+                      f"skip={timeline.sample(now)[1]} elapsed rows.", flush=True)
             now = time.monotonic()
             if now >= next_request and inference.request():
                 requests += 1
@@ -207,26 +237,23 @@ def run(args):
         stack.enter_context(stop_signals(stop))
         client = connect_policy(args.host, args.port, args.request_timeout)
         stack.callback(client.close)
-        if args.hardware and client.get_server_metadata().get("mock_policy"):
+        if args.hardware and client.metadata["mock"]:
             raise ValueError("A mock policy cannot control physical hardware.")
-        cameras = stack.enter_context(PolicyCameras(args.camera, mock=args.mock_cameras,
-                                                   max_age=args.camera_max_age))
+        cameras = stack.enter_context(PolicyCameras(args.camera, client.metadata["rgb"],
+                                                   mock=args.mock_cameras, max_age=args.camera_max_age))
         robot = stack.enter_context(Robot(args, stop))
         keys = stack.enter_context(StopKey())
 
         def observe():
             snapshot = robot.state()
-            state = np.asarray(snapshot["state"], dtype=np.float32)
             observed_at = snapshot["observed_at"]
-            images, times = cameras.snapshot()
-            if max(abs(value - observed_at) for value in times) > args.camera_max_skew:
+            frames = cameras.snapshot()
+            if any(abs(stamp - observed_at) > args.camera_max_skew for _, stamp in frames.values()):
                 raise TimeoutError("Camera/state acquisition timestamps differ too much.")
-            return {"state": state, "image": images,
-                    "image_mask": {key: np.bool_(True) for key in images},
-                    "prompt": args.instruction}, observed_at
+            return build_observation(snapshot, frames, args.instruction), observed_at
 
         print(f"Policy {'HARDWARE' if args.hardware else 'SIMULATION'}: "
-              f"ws://{args.host}:{args.port}; 30 Hz; replan every {args.replan_steps} steps. "
+              f"ws://{args.host}:{args.port}; {CONTROL_HZ} Hz; replan every {args.replan_steps} steps. "
               "Space/Esc/Q/Ctrl-C stops control and hardware exit attempts current-position hold.", flush=True)
         return control_loop(robot, client, observe, stop, duration=args.duration,
                             replan_steps=args.replan_steps, keys=keys)
@@ -240,9 +267,9 @@ def parser():
     result.add_argument("--hardware", action="store_true", help="Enable physical dual-arm control; default is simulation")
     cameras = result.add_mutually_exclusive_group(required=True)
     cameras.add_argument("--camera", action="append", metavar="NAME=DEVICE",
-                         help="Repeat for top, left_wrist and right_wrist")
+                         help="Repeat once per camera stream the policy requires")
     cameras.add_argument("--mock-cameras", action="store_true", help="Synthetic images for simulation tests")
-    result.add_argument("--replan-steps", type=int, default=16, help="Request a new chunk every N observation steps")
+    result.add_argument("--replan-steps", type=int, default=16, help="Request a new chunk every N control periods (30 Hz)")
     result.add_argument("--request-timeout", type=float, default=1., help="Bound each socket operation in seconds")
     result.add_argument("--camera-max-age", type=float, default=.25)
     result.add_argument("--camera-max-skew", type=float, default=.10, help="Maximum camera/state skew in seconds")
@@ -259,8 +286,8 @@ def main(argv=None):
     args = cli.parse_args(argv)
     if not 1 <= args.port <= 65535:
         cli.error("port must be between 1 and 65535")
-    if not args.instruction.strip() or not 1 <= args.replan_steps < 50:
-        cli.error("provide a nonempty instruction and replan steps in [1, 49]")
+    if not args.instruction.strip() or args.replan_steps < 1:
+        cli.error("provide a nonempty instruction and positive replan steps")
     for key in ("request_timeout", "camera_max_age", "camera_max_skew", "duration", "gripper_open_deg"):
         value = getattr(args, key)
         if value is not None and (not math.isfinite(value) or value <= 0):

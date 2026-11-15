@@ -12,26 +12,32 @@ import unittest
 from unittest.mock import patch
 
 import numpy as np
-from openpi_client.msgpack_numpy import packb as pack, unpackb as unpack
-from websockets.exceptions import ConnectionClosed
-from websockets.sync.server import serve
 
 import rebot_policy as policy
 import rebot_policy_camera as cameras
+import rebot_policy_link as link
 
-def observation():
-    state = np.zeros(26, np.float32)
-    for offset in (0, 13):
-        state[offset + 3:offset + 12] = np.eye(3).ravel(order="F")
-        state[offset + 12] = .5
-    return {"state": state,
-            "image": {key: np.zeros((224, 224, 3), np.uint8) for key in cameras.CAMERA_KEYS},
-            "image_mask": {key: np.bool_(True) for key in cameras.CAMERA_KEYS},
-            "prompt": "transport test"}
+POSE = [0., 0., 0., 1., 0., 0., 0., 1., 0., 0., 0., 1.]
 
-def hold_actions(state=None):
-    state = observation()["state"] if state is None else state
-    return np.repeat(np.asarray(state)[None], 50, axis=0)
+
+def observation(now=None):
+    now = time.monotonic() if now is None else now
+    state = [*POSE, .5, *POSE, .5]
+    snapshot = {"state": state, "observed_at": now, "acquired_at": {"left": now, "right": now}}
+    frames = {name: (b"\xff\xd8jpeg", now) for name in link.REBOT_RGB}
+    return policy.build_observation(snapshot, frames, "transport test")
+
+
+def hold_reply(obs=None, horizon=50):
+    return link.HoldPolicy(0., horizon=horizon)(observation() if obs is None else obs)
+
+
+def hold_chunk(observed_at, x=None, horizon=50):
+    """Parsed 30 Hz chunk anchored at observed_at; x optionally sets left x per row."""
+    reply = hold_reply(observation(observed_at), horizon)
+    if x is not None:
+        reply["state"]["left_eef"]["pose"] = [[float(v), *POSE[1:]] for v in x]
+    return policy.parse_actions(reply)
 
 class SlowClient:
     timeout = .5
@@ -49,7 +55,7 @@ class SlowClient:
             time.sleep(self.latency)
             if self.fail:
                 raise TimeoutError("injected inference timeout")
-            return {"actions": hold_actions(observation["state"])}
+            return hold_reply(observation)
         finally:
             self.active -= 1
 
@@ -58,35 +64,29 @@ class SlowClient:
 
 @contextmanager
 def endpoint(infer, metadata=None):
-    def handler(socket):
-        try:
-            socket.send(pack(policy.METADATA if metadata is None else metadata))
-            for request in socket:
-                result = infer(unpack(request))
-                socket.send(pack(result))
-        except ConnectionClosed:
-            pass
-
-    with serve(handler, "127.0.0.1", 0, compression=None, close_timeout=.1) as server:
-        thread = threading.Thread(target=server.serve_forever)
-        thread.start()
-        try:
-            yield server.socket.getsockname()[1]
-        finally:
+    servers = []
+    thread = threading.Thread(target=link.serve, args=(infer, metadata or link.metadata(), "127.0.0.1", 0),
+                              kwargs={"ready": servers.append})
+    thread.start()
+    try:
+        while not servers and thread.is_alive():
+            time.sleep(.005)
+        yield servers[0].socket.getsockname()[1]
+    finally:
+        for server in servers:
             server.shutdown()
-            thread.join(timeout=2)
+        thread.join(timeout=2)
 
 class CLITests(unittest.TestCase):
     def test_original_command_runs_against_a_remote_policy(self):
-        prompts = []
+        seen = []
 
         def infer(obs):
-            prompts.append(obs["prompt"])
-            self.assertEqual(set(obs["image"]), set(cameras.CAMERA_KEYS))
+            seen.append((obs["instruction"], sorted(obs["rgb"]), sorted(obs["state"])))
             time.sleep(.04)
-            return {"actions": hold_actions(obs["state"])}
+            return hold_reply(obs)
 
-        with endpoint(infer) as port:
+        with endpoint(infer, link.metadata(rgb=["front", "side"])) as port:
             result = subprocess.run([
                 sys.executable, str(Path(policy.__file__)), "--host", "127.0.0.1", "--port", str(port),
                 "--instruction", "hold test", "--mock-cameras", "--duration", ".4",
@@ -94,11 +94,11 @@ class CLITests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("Policy SIMULATION", result.stdout)
         self.assertIn("Policy control:", result.stdout)
-        self.assertEqual(prompts, ["hold test"])
+        # Camera streams follow the server's declaration; nothing model-specific is sent.
+        self.assertEqual(seen, [("hold test", ["front", "side"], sorted(policy.STREAMS))])
 
     def test_mock_service_is_rejected_before_connecting_hardware(self):
-        metadata = {**policy.METADATA, "mock_policy": True}
-        with endpoint(lambda obs: {}, metadata=metadata) as port, \
+        with endpoint(lambda obs: {}, link.metadata(mock=True)) as port, \
                 patch("rebot_control.Robot") as robot, patch.object(cameras, "PolicyCameras") as capture, \
                 patch("sys.stderr", new_callable=io.StringIO):
             result = policy.main(["--port", str(port), "--instruction", "hold", "--hardware",
@@ -111,22 +111,20 @@ class CLITests(unittest.TestCase):
 
 class TimelineTests(unittest.TestCase):
     def test_latency_skips_expired_rows_without_replaying_them(self):
-        chunk = hold_actions()
-        chunk[:, 0] = np.arange(50)
         timeline = policy.ActionTimeline()
-        timeline.accept(chunk, 10., 10.08)
+        timeline.accept(hold_chunk(10., x=range(50)), 10., 10.08)
         action, index = timeline.sample(10.08)
         self.assertEqual(index, 2)
         self.assertEqual(action[0], 2)
-        self.assertEqual(timeline.sample(10.30)[1], 9)
+        self.assertEqual(action.shape, (26,))
+        self.assertEqual(timeline.sample(10.31)[1], 9)
         with self.assertRaises(TimeoutError):
             timeline.sample(12.)
 
     def test_new_plan_keeps_its_own_observation_anchor(self):
         timeline = policy.ActionTimeline()
-        timeline.accept(hold_actions(), 10., 10.1)
-        new = hold_actions()
-        new[:, 0] = np.arange(50) + 100
+        timeline.accept(hold_chunk(10.), 10., 10.1)
+        new = hold_chunk(10.5, x=np.arange(50) + 100)
         timeline.accept(new, 10.5, 10.6)
         action, index = timeline.sample(10.61)
         self.assertEqual(index, 3)
@@ -134,37 +132,113 @@ class TimelineTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             timeline.accept(new, 10.4, 10.7)
 
-    def test_bad_shapes_nonfinite_relative_actions_and_expired_chunks_fail(self):
-        for shape in ((50, 20), (50, 32), (49, 26)):
+    def test_horizon_and_rate_come_from_the_reply_timestamps(self):
+        reply = hold_reply(observation(10.))
+        for name, table in reply["state"].items():
+            column = link.state_column(name)
+            # Eight targets at 10 Hz instead of fifty at 30 Hz.
+            table["timestamp_ns"] = link.future_timestamps(10_000_000_000, 8, 10)
+            table[column] = table[column][:8]
+        reply["state"]["right_gripper"]["openness"] = [.1 * k for k in range(8)]
+        timeline = policy.ActionTimeline()
+        timeline.accept(policy.parse_actions(reply), 10., 10.05, replan_after=.5)
+        action, index = timeline.sample(10.35)
+        self.assertEqual(index, 3)
+        self.assertAlmostEqual(action[25], .3)
+        with self.assertRaisesRegex(ValueError, "replanning"):
+            policy.ActionTimeline().accept(policy.parse_actions(reply), 10., 10.05, replan_after=.8)
+
+    def test_malformed_replies_and_expired_chunks_fail(self):
+        missing = hold_reply()
+        del missing["state"]["right_gripper"]
+        ragged = hold_reply()
+        ragged["state"]["left_eef"]["pose"][3] = POSE[:11]
+        nonfinite = hold_reply()
+        nonfinite["state"]["left_eef"]["pose"][0] = [float("nan"), *POSE[1:]]
+        skewed = hold_reply()
+        skewed["state"]["left_eef"]["pose"][0] = [0., 0., 0., 2., 0., 0., 0., 1., 0., 0., 0., 1.]
+        repeated = hold_reply()
+        repeated["state"]["left_gripper"]["timestamp_ns"][1] = repeated["state"]["left_gripper"]["timestamp_ns"][0]
+        for reply in (missing, ragged, nonfinite, skewed, repeated, {"actions": []}):
             with self.assertRaises(ValueError):
-                policy.validate_actions(np.zeros(shape))
-        value = hold_actions()
-        value[0, 0] = np.nan
-        with self.assertRaises(ValueError):
-            policy.validate_actions(value)
+                policy.parse_actions(reply)
+        wide = hold_reply()
+        wide["state"]["left_gripper"]["openness"][0] = 1.4
+        self.assertEqual(policy.parse_actions(wide)["left_gripper"][1][0], 1.)
         with self.assertRaises(TimeoutError):
-            policy.ActionTimeline().accept(hold_actions(), 10., 12.)
+            policy.ActionTimeline().accept(hold_chunk(10.), 10., 12.)
+        with self.assertRaisesRegex(ValueError, "later than"):
+            policy.ActionTimeline().accept(hold_chunk(10.), 10.04, 10.05)
+
 
 class NetworkTests(unittest.TestCase):
 
-    def test_numpy_protocol_roundtrip_and_metadata(self):
+    def test_recording_shaped_roundtrip_and_metadata(self):
         obs = observation()
-        with endpoint(lambda obs: {'actions': hold_actions(obs['state'])}) as port:
+        received = []
+
+        def infer(request):
+            received.append(request)
+            return hold_reply(request)
+
+        with endpoint(infer) as port:
             client = policy.connect_policy('127.0.0.1', port, 0.5)
             try:
+                self.assertEqual(client.metadata["rgb"], list(link.REBOT_RGB))
                 output = client.infer(obs)
-                np.testing.assert_array_equal(output['actions'], hold_actions())
             finally:
                 client.close()
-        with endpoint(lambda obs: {}, metadata={}) as port:
-            with self.assertRaisesRegex(ValueError, 'metadata'):
+        self.assertEqual(received, [obs])
+        self.assertEqual(set(obs), {"timestamp_ns", "instruction", "state", "rgb"})
+        self.assertEqual(obs["state"]["left_eef"], {"timestamp_ns": [obs["timestamp_ns"]], "pose": [POSE]})
+        self.assertEqual(obs["rgb"]["top"]["jpeg"], [b"\xff\xd8jpeg"])
+        times, poses = policy.parse_actions(output)["right_eef"]
+        self.assertEqual(poses.shape, (50, 12))
+        np.testing.assert_allclose(times - obs["timestamp_ns"] / 1e9, (np.arange(50) + 1) / 30, atol=1e-6)
+
+    def test_incompatible_servers_are_refused(self):
+        from websockets.sync.server import serve
+
+        with serve(lambda socket: socket.send(link.pack({"protocol": "something-else/1"})),
+                   "127.0.0.1", 0) as server:
+            thread = threading.Thread(target=server.serve_forever)
+            thread.start()
+            try:
+                with self.assertRaisesRegex(ValueError, 'protocol'):
+                    policy.connect_policy('127.0.0.1', server.socket.getsockname()[1], 0.5)
+            finally:
+                server.shutdown()
+                thread.join(timeout=2)
+        with endpoint(lambda obs: {}, link.metadata(state=["left_eef", "head_eef"])) as port:
+            with self.assertRaisesRegex(ValueError, 'head_eef'):
                 policy.connect_policy('127.0.0.1', port, 0.5)
+
+    def test_server_side_failures_reach_the_client_as_errors(self):
+        def broken(obs):
+            raise RuntimeError("model exploded")
+
+        with endpoint(broken) as port:
+            client = policy.connect_policy('127.0.0.1', port, 0.5)
+            try:
+                with self.assertRaisesRegex(RuntimeError, "model exploded"):
+                    client.infer(observation())
+            finally:
+                client.close()
+        with endpoint(hold_reply) as port:
+            client = policy.connect_policy('127.0.0.1', port, 0.5)
+            try:
+                incomplete = observation()
+                del incomplete["rgb"]["top"]
+                with self.assertRaisesRegex(RuntimeError, "lacks required rgb"):
+                    client.infer(incomplete)
+            finally:
+                client.close()
 
     def test_socket_timeout_is_bounded(self):
 
         def delay(obs):
             time.sleep(0.15)
-            return {'actions': hold_actions()}
+            return hold_reply(obs)
         with endpoint(delay) as port:
             client = policy.connect_policy('127.0.0.1', port, 0.03)
             began = time.monotonic()
@@ -235,7 +309,7 @@ class AsyncTests(unittest.TestCase):
         released = threading.Event()
         client = SlowClient()
         client.timeout = .03
-        client.infer = lambda obs: (released.wait(2), {"actions": hold_actions()})[1]
+        client.infer = lambda obs: (released.wait(2), hold_reply())[1]
         client.close = released.set
         stop = threading.Event()
         with policy.InferenceWorker(client, lambda: (observation(), time.monotonic()), stop) as worker:
@@ -248,9 +322,11 @@ class AsyncTests(unittest.TestCase):
 
 class CameraTests(unittest.TestCase):
 
-    def test_existing_preview_timestamp_transport_and_process_cleanup(self):
+    def test_capture_jpeg_is_forwarded_untouched_and_process_is_cleaned_up(self):
+        from PIL import Image
+
         jpeg = io.BytesIO()
-        cameras.Image.fromarray(np.full((240, 320, 3), [20, 40, 60], np.uint8)).save(jpeg, format='JPEG')
+        Image.fromarray(np.full((240, 320, 3), [20, 40, 60], np.uint8)).save(jpeg, format='JPEG')
         script = "import argparse,socket,struct,time\np=argparse.ArgumentParser();p.add_argument('--source');p.add_argument('--socket-fd',type=int)\na=p.parse_args();s=socket.socket(fileno=a.socket_fd)\nwhile True:\n payload=struct.pack('!d',time.monotonic())+JPEG\n s.sendall(struct.pack('!I',len(payload))+payload);time.sleep(.02)\n".replace('JPEG', repr(jpeg.getvalue()))
         with tempfile.TemporaryDirectory() as directory:
             helper = Path(directory) / 'camera.py'
@@ -260,9 +336,8 @@ class CameraTests(unittest.TestCase):
             try:
                 self.assertTrue(stream.ready.wait(3.0))
                 frame, stamp = stream.snapshot(1.0)
-                self.assertEqual(frame.shape, (224, 224, 3))
+                self.assertEqual(frame, jpeg.getvalue())
                 self.assertLess(time.monotonic() - stamp, 1.0)
-                np.testing.assert_allclose(frame[112, 112], [20, 40, 60], atol=3)
             finally:
                 stream.close()
             self.assertIsNotNone(stream.process.poll())
@@ -282,17 +357,23 @@ class CameraTests(unittest.TestCase):
                 stream.close()
             self.assertFalse(stream.thread.is_alive())
 
-    def test_missing_and_duplicate_camera_roles_fail(self):
-        for sources in (['top=0'], ['top=0', 'left_wrist=0', 'right_wrist=2']):
+    def test_cameras_must_match_the_streams_the_policy_declares(self):
+        for sources in (['top=0'], ['top=0', 'left_wrist=0', 'right_wrist=2'],
+                        ['top=0', 'left_wrist=2', 'right_wrist=4', 'extra=6']):
             with self.assertRaises(ValueError):
-                cameras.PolicyCameras(sources)
+                cameras.PolicyCameras(sources, link.REBOT_RGB)
+        cameras.PolicyCameras(['front=0', 'side=2'], ['side', 'front'])
+        with cameras.PolicyCameras(None, ['front'], mock=True) as mock:
+            jpeg, stamp = mock.snapshot()['front']
+        self.assertEqual(jpeg[:2], b'\xff\xd8')
+        self.assertLess(time.monotonic() - stamp, 1.0)
 
     def test_stale_camera_frame_fails(self):
         stream = cameras.CameraStream.__new__(cameras.CameraStream)
         stream.lock = threading.Lock()
         stream.error = None
         stream.source = 'synthetic'
-        stream.frame = np.zeros((224, 224, 3), np.uint8)
+        stream.frame = b'\xff\xd8'
         stream.acquired_at = time.monotonic() - 1
         with self.assertRaises(TimeoutError):
             stream.snapshot(0.25)

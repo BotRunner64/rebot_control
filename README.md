@@ -276,7 +276,7 @@ python -m unittest discover -s tests -p 'test_rebot_ee*.py' -v
 
 ### 远端策略控制 CLI
 
-`rebot_policy.py` 保留原来的启动方式，负责相机观测、远端请求、异步动作调度和双臂控制。模型加载、权重和推理服务实现放在服务端仓库；本仓库仅使用已安装的轻量客户端 SDK 通信和缩放图像。控制环境需安装 `ee`、`policy` 可选依赖。
+`rebot_policy.py` 保留原来的启动方式，负责相机观测、远端请求、异步动作调度和双臂控制。模型加载、权重和推理服务实现放在服务端仓库。通讯与具体策略无关：观测和动作都沿用采集契约的流名与列，模型相关的转换由服务端适配，详见[策略链路协议](docs/policy_link.md)。控制环境需安装 `ee`、`policy` 可选依赖。
 
 ```bash
 conda activate rebot_control
@@ -287,9 +287,9 @@ python rebot_policy.py --host 127.0.0.1 --port 8000 \
   --camera right_wrist=/dev/video2
 ```
 
-相机设备按实物填写，instruction 使用训练任务原文。去掉 `--hardware` 运行运动学仿真；`--mock-cameras` 可替代相机参数用于仿真联调，实机禁止合成相机和 mock 策略。服务端启动与模型配置见服务端仓库。
+相机名必须恰好是服务端声明需要的相机流（当前策略为 `top`、`left_wrist`、`right_wrist`），设备按实物填写，instruction 使用训练任务原文。去掉 `--hardware` 运行运动学仿真；`--mock-cameras` 可替代相机参数用于仿真联调，实机禁止合成相机和 mock 策略。服务端启动与模型配置见服务端仓库。
 
-控制端按 30 Hz 执行 `(50,26)` 的绝对 EEF 动作块，沿用[采集契约](docs/recording.md)的顺序、坐标和夹爪开度。后台每 16 步提前请求下一块（`--replan-steps`），等待期间继续执行当前块，并按观测时间跳过已过期的动作。每臂 CAN 独立请求 250 Hz，沿用现有 IK、重力补偿、夹爪总力矩限幅和跟踪误差检查；自碰撞时保留上一有效双臂目标。
+控制端按 30 Hz 执行服务端返回的绝对 EEF 目标，坐标和夹爪开度沿用[采集契约](docs/recording.md)；动作块的行数和时间间隔由回复中的时间戳决定。后台每 16 个控制周期提前请求下一块（`--replan-steps`），等待期间继续执行当前块，并按时间戳跳过已过期的目标。每臂 CAN 独立请求 250 Hz，沿用现有 IK、重力补偿、夹爪总力矩限幅和跟踪误差检查；自碰撞时保留上一有效双臂目标。
 
 Space、Esc、Q、Ctrl-C 停止，`--duration 10` 可限制运行时长。请求超时、相机/反馈过期、非法动作或 CAN 故障也会停止，退出尝试当前位置原生保持并保持使能。`--request-timeout` 默认 1 秒，`--camera-max-age` 默认 0.25 秒，`--camera-max-skew` 默认 0.10 秒；`--gripper-open-deg` 默认 270°，应与采集时一致。
 

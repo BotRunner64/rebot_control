@@ -1,6 +1,7 @@
-"""Latest RGB camera snapshots; camera reads never run on the control thread."""
+"""Latest JPEG camera snapshots; camera reads never run on the control thread."""
 
 import io
+import math
 from pathlib import Path
 import socket
 import struct
@@ -8,14 +9,9 @@ import subprocess
 import threading
 import time
 
-import numpy as np
-from PIL import Image
-
 from rebot_record_preview import packet
 
 
-CAMERA_KEYS = ("base_0_rgb", "left_wrist_0_rgb", "right_wrist_0_rgb")
-CAMERA_NAMES = ("top", "left_wrist", "right_wrist")
 CAPTURE_SCRIPT = Path(__file__).with_name("rebot_policy_camera_capture.py")
 
 
@@ -55,13 +51,14 @@ class CameraStream:
                 if len(payload) <= 8:
                     raise ValueError("Incomplete camera sample.")
                 acquired = struct.unpack("!d", payload[:8])[0]
-                if not np.isfinite(acquired) or not 0 <= time.monotonic() - acquired <= 1.:
+                if not math.isfinite(acquired) or not 0 <= time.monotonic() - acquired <= 1.:
                     raise TimeoutError("Camera acquisition timestamp is invalid or stale.")
-                with Image.open(io.BytesIO(payload[8:])) as image:
-                    rgb = np.array(image.convert("RGB"))
+                # Forward the capture process's JPEG untouched; the policy side decodes and resizes.
+                if payload[8:10] != b"\xff\xd8":
+                    raise ValueError("Camera sample is not a JPEG image.")
                 self.connection.settimeout(1.)
                 with self.lock:
-                    self.frame, self.acquired_at = rgb, acquired
+                    self.frame, self.acquired_at = payload[8:], acquired
                 self.ready.set()
         except Exception as exc:
             if self.done.is_set():
@@ -71,15 +68,12 @@ class CameraStream:
             self.ready.set()
 
     def snapshot(self, max_age):
-        from openpi_client.image_tools import resize_with_pad
-
         with self.lock:
             if self.error is not None:
                 raise RuntimeError(f"Camera {self.source} failed: {self.error}") from self.error
             if self.frame is None or not 0 <= time.monotonic() - self.acquired_at <= max_age:
                 raise TimeoutError(f"Camera {self.source} has no fresh frame.")
-            frame, stamp = self.frame.copy(), self.acquired_at
-        return resize_with_pad(frame, 224, 224), stamp
+            return self.frame, self.acquired_at
 
     def close(self):
         self.done.set()
@@ -99,23 +93,31 @@ class CameraStream:
 
 
 class PolicyCameras:
-    def __init__(self, cameras, *, mock=False, max_age=.25):
+    """Exactly the named camera streams a policy requires; snapshot() -> {name: (jpeg, acquired_at)}."""
+
+    def __init__(self, cameras, names, *, mock=False, max_age=.25):
         self.streams = []
-        self.mock, self.max_age = mock, max_age
-        self.sources = None
-        if not mock:
+        self.names, self.mock, self.max_age = tuple(names), mock, max_age
+        self.sources = self.mock_jpeg = None
+        if mock:
+            from PIL import Image
+
+            buffer = io.BytesIO()
+            Image.new("RGB", (640, 480)).save(buffer, format="JPEG")
+            self.mock_jpeg = buffer.getvalue()
+        else:
             from rebot_recording import parse_cameras
 
             self.sources = parse_cameras(cameras or [])
-            if set(self.sources) != set(CAMERA_NAMES):
-                raise ValueError("Name exactly three cameras: top, left_wrist, right_wrist.")
-            if len({str(Path(p).resolve()) for p in self.sources.values()}) != 3:
+            if set(self.sources) != set(self.names):
+                raise ValueError(f"Name exactly the cameras this policy requires: {', '.join(self.names)}.")
+            if len({str(Path(p).resolve()) for p in self.sources.values()}) != len(self.sources):
                 raise ValueError("Policy camera devices must be distinct.")
 
     def __enter__(self):
         try:
             if not self.mock:
-                for name in CAMERA_NAMES:
+                for name in self.names:
                     self.streams.append(CameraStream(self.sources[name]))
                 deadline = time.monotonic() + 10.
                 for stream in self.streams:
@@ -129,10 +131,8 @@ class PolicyCameras:
 
     def snapshot(self):
         if self.mock:
-            return ({key: np.zeros((224, 224, 3), np.uint8) for key in CAMERA_KEYS},
-                    [time.monotonic()] * 3)
-        frames = [stream.snapshot(self.max_age) for stream in self.streams]
-        return dict(zip(CAMERA_KEYS, (f[0] for f in frames))), [f[1] for f in frames]
+            return {name: (self.mock_jpeg, time.monotonic()) for name in self.names}
+        return {name: stream.snapshot(self.max_age) for name, stream in zip(self.names, self.streams)}
 
     def __exit__(self, *_):
         for stream in self.streams:

@@ -4,6 +4,7 @@ __pycache__/
 .venv/
 venv/
 *.egg-info/
+/policy_link/build/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
