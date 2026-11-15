@@ -24,7 +24,7 @@ WebSocket 二进制帧，内容为普通 MessagePack（不使用 NumPy 扩展，
  "mock":  false}
 ```
 
-`state` 和 `rgb` 是该策略在每条观测中需要的流。`rebot policy` 的 `--camera NAME=DEVICE` 必须恰好提供 `rgb` 列出的相机。`mock` 为真的服务不能控制实机。可以附带其他说明字段，控制端忽略。
+`state` 和 `rgb` 是该策略在每条观测中需要的流。`rebot policy` 的 `--camera NAME=DEVICE` 必须恰好提供 `rgb` 列出的相机。`mock` 为真的服务会被 `rebot policy` 拒绝。可以附带其他说明字段，控制端忽略。
 
 ## 观测（控制端 → 服务端）
 
@@ -76,12 +76,3 @@ link.serve(infer, link.metadata(rgb=["top", "left_wrist", "right_wrist"]), "127.
 ```
 
 外壳负责握手、观测与回复的结构校验、跨连接串行推理和错误回传。
-
-## 不依赖任何模型的联调
-
-```bash
-python -m rebot_policy_link --port 8001 --latency .12
-rebot policy --port 8001 --instruction hold --mock-cameras --duration 3
-```
-
-第一条命令启动 mock 保持策略（以 30Hz、50 行返回最新观测状态），可用 `--camera NAME` 重复指定它声明需要的相机名。

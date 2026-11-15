@@ -133,27 +133,20 @@ rebot ee --pose 0.30 0.07 0.65 0 -30 20           # 绝对位姿：x y z(m) roll
 
 ## 远端策略控制 `rebot policy`
 
-把相机图像和双臂状态发给策略服务，按 30 Hz 执行返回的绝对末端目标。默认仿真。
+把相机图像和双臂状态发给策略服务，按 30 Hz 执行返回的绝对末端目标。只有实机模式：运行即使能双臂和夹爪。
 
 ```bash
 rebot policy --host 127.0.0.1 --port 8000 \
-  --instruction "训练时的任务原文" --hardware \
+  --instruction "训练时的任务原文" \
   --camera top=/dev/video4 --camera left_wrist=/dev/video0 --camera right_wrist=/dev/video2
 ```
 
 - 相机名必须恰好是服务端声明需要的那几路。
-- 去掉 `--hardware` 是仿真；`--mock-cameras` 用合成图像联调。实机禁止 mock 相机和 mock 策略。
+- 声明自己是 mock 的策略服务会被拒绝。
 - 每 16 个控制周期（`--replan-steps`）在后台请求下一段动作，等待时继续执行当前段，过期的目标按时间戳跳过。
 - 请求超时（`--request-timeout`，默认 1 s）、相机过期（`--camera-max-age` 0.25 s）、相机与状态时间差过大（`--camera-max-skew` 0.10 s）、非法动作、CAN 故障都会停止并保持。
-- `--gripper-open-deg` 应与采集时一致（默认 270）。
+- `--duration 10` 限制运行时长。`--gripper-open-deg` 应与采集时一致（默认 270）。
 - 消息格式和如何接入新策略见 [策略链路协议](policy-link.md)。
-
-不依赖模型的联调：
-
-```bash
-python -m rebot_policy_link --port 8001 --latency .12        # mock 策略：原地保持
-rebot policy --port 8001 --instruction hold --mock-cameras --duration 3
-```
 
 ## 重力辨识 `rebot identify`
 

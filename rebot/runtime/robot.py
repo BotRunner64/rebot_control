@@ -7,8 +7,6 @@ State and target layout, per arm (left then right), 13 values each:
 from contextlib import ExitStack
 import math
 import sys
-import threading
-import time
 
 import numpy as np
 from scipy.spatial.transform import Rotation
@@ -17,7 +15,7 @@ from rebot.bindings import SIDES, select_arms
 from rebot.devices.robstride import MotorBus
 from rebot.model.gravity import GravityModel
 from rebot.model.gripper import load_gripper_settings
-from rebot.model.kinematics import CartesianIK, SIM_START
+from rebot.model.kinematics import CartesianIK
 from rebot.model.limits import GRIPPER_OPEN_DEG, validate_tracking_error
 from rebot.paths import ARM_BINDINGS, CONTROL_SETTINGS, GRIPPER_SETTINGS
 from rebot.runtime.arm import Arm, open_arms
@@ -45,27 +43,21 @@ def decode_targets(values):
 
 
 class Robot:
-    """Both arms and grippers behind `state()` and `command()`; simulation unless `hardware`."""
+    """Both physical arms and grippers behind `state()` and `command()`."""
 
-    def __init__(self, *, hardware, stop, config=ARM_BINDINGS, settings=CONTROL_SETTINGS,
+    def __init__(self, *, stop, config=ARM_BINDINGS, settings=CONTROL_SETTINGS,
                  gripper_settings=GRIPPER_SETTINGS, gripper_open_deg=GRIPPER_OPEN_DEG,
                  bus_factory=MotorBus):
-        self.hardware, self.stop, self.bus_factory = hardware, stop, bus_factory
+        self.stop, self.bus_factory = stop, bus_factory
         self.config, self.gripper_settings = config, gripper_settings
         self.gripper_open = math.radians(gripper_open_deg)
         self.gripper_open_deg = gripper_open_deg
         self.cfg = load_settings(settings)
         self.stack = ExitStack()
         self.iks, self.workers = {}, {}
-        # Simulation stores [q1..q6, openness] per arm.
-        self.sim_q = {side: np.append(SIM_START, .5) for side in SIDES}
-        self.sim_lock = threading.Lock()
 
     def __enter__(self):
         try:
-            if not self.hardware:
-                self.iks = {side: CartesianIK(SIM_START) for side in SIDES}
-                return self
             bindings = select_arms(self.config, "both")
             gripper = load_gripper_settings(self.gripper_settings)
             arms = {side: Arm(bindings[side], self.cfg, gravity=GravityModel(), gripper=gripper,
@@ -105,9 +97,6 @@ class Robot:
 
     def _measured(self, side):
         """Joint angles with normalized openness in the last slot, and their timestamp."""
-        if not self.hardware:
-            with self.sim_lock:
-                return self.sim_q[side].copy(), time.monotonic()
         q, acquired_at = self.workers[side].snapshot()
         q[6] = np.clip(q[6] / self.gripper_open, 0., 1.)
         return q, acquired_at
@@ -136,12 +125,8 @@ class Robot:
             if ik.has_self_collision(q):
                 return False
             validate_tracking_error(q, measured[:6], self.cfg.max_tracking_error_deg)
-            pending[side] = np.append(q, grip * self.gripper_open if self.hardware else grip)
+            pending[side] = np.append(q, grip * self.gripper_open)
         # Neither arm receives a target until both solutions have passed validation.
-        if self.hardware:
-            for side in SIDES:
-                self.workers[side].command(pending[side])
-        else:
-            with self.sim_lock:
-                self.sim_q.update(pending)
+        for side in SIDES:
+            self.workers[side].command(pending[side])
         return True

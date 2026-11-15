@@ -222,8 +222,7 @@ def control_loop(robot, client, observe, stop, *, duration=None, replan_steps=16
     return report
 
 
-def run(*, host, port, instruction, hardware=False, camera=None, mock_cameras=False,
-        replan_steps=16, request_timeout=1., camera_max_age=.25, camera_max_skew=.10,
+def run(*, host, port, instruction, camera, replan_steps=16, request_timeout=1., camera_max_age=.25, camera_max_skew=.10,
         duration=None, gripper_open_deg=270., config=ARM_BINDINGS, settings=CONTROL_SETTINGS,
         gripper_settings=GRIPPER_SETTINGS):
     """Connect the policy, the cameras and the robot, then run `control_loop` until stopped."""
@@ -236,11 +235,11 @@ def run(*, host, port, instruction, hardware=False, camera=None, mock_cameras=Fa
         stack.enter_context(stop_signals(stop))
         client = connect_policy(host, port, request_timeout)
         stack.callback(client.close)
-        if hardware and client.metadata["mock"]:
+        if client.metadata["mock"]:
             raise ValueError("A mock policy cannot control physical hardware.")
         cameras = stack.enter_context(PolicyCameras(camera, client.metadata["rgb"],
-                                                   mock=mock_cameras, max_age=camera_max_age))
-        robot = stack.enter_context(Robot(hardware=hardware, stop=stop, config=config,
+                                                   max_age=camera_max_age))
+        robot = stack.enter_context(Robot(stop=stop, config=config,
                                           settings=settings, gripper_settings=gripper_settings,
                                           gripper_open_deg=gripper_open_deg))
         keys = stack.enter_context(StopKey())
@@ -253,8 +252,7 @@ def run(*, host, port, instruction, hardware=False, camera=None, mock_cameras=Fa
                 raise TimeoutError("Camera/state acquisition timestamps differ too much.")
             return build_observation(snapshot, frames, instruction), observed_at
 
-        print(f"Policy {'HARDWARE' if hardware else 'SIMULATION'}: "
-              f"ws://{host}:{port}; {CONTROL_HZ} Hz; replan every {replan_steps} steps. "
-              "Space/Esc/Q/Ctrl-C stops control and hardware exit attempts current-position hold.", flush=True)
+        print(f"Policy control: ws://{host}:{port}; {CONTROL_HZ} Hz; replan every {replan_steps} steps. "
+              "Space/Esc/Q/Ctrl-C stops and attempts current-position hold.", flush=True)
         return control_loop(robot, client, observe, stop, duration=duration,
                             replan_steps=replan_steps, keys=keys)

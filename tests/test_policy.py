@@ -87,30 +87,11 @@ def capture_stream(directory, source):
 
 
 class CLITests(unittest.TestCase):
-    def test_original_command_runs_against_a_remote_policy(self):
-        seen = []
-
-        def infer(obs):
-            seen.append((obs["instruction"], sorted(obs["rgb"]), sorted(obs["state"])))
-            time.sleep(.04)
-            return hold_reply(obs)
-
-        with endpoint(infer, link.metadata(rgb=["front", "side"])) as port:
-            result = subprocess.run([
-                sys.executable, "-m", "rebot", "policy", "--host", "127.0.0.1", "--port", str(port),
-                "--instruction", "hold test", "--mock-cameras", "--duration", ".4",
-            ], capture_output=True, text=True, timeout=15)
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("Policy SIMULATION", result.stdout)
-        self.assertIn("Policy control:", result.stdout)
-        # Camera streams follow the server's declaration; nothing model-specific is sent.
-        self.assertEqual(seen, [("hold test", ["front", "side"], sorted(policy.STREAMS))])
-
     def test_mock_service_is_rejected_before_connecting_hardware(self):
         with endpoint(lambda obs: {}, link.metadata(mock=True)) as port, \
                 patch("rebot.runtime.robot.Robot") as robot, patch.object(cameras, "PolicyCameras") as capture, \
                 patch("sys.stderr", new_callable=io.StringIO):
-            result = cli.main(["policy", "--port", str(port), "--instruction", "hold", "--hardware",
+            result = cli.main(["policy", "--port", str(port), "--instruction", "hold",
                                "--camera", "top=0", "--camera", "left_wrist=2",
                                "--camera", "right_wrist=4"])
         self.assertEqual(result, 2)
@@ -364,10 +345,6 @@ class CameraTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 cameras.PolicyCameras(sources, link.REBOT_RGB)
         cameras.PolicyCameras(['front=0', 'side=2'], ['side', 'front'])
-        with cameras.PolicyCameras(None, ['front'], mock=True) as mock:
-            jpeg, stamp = mock.snapshot()['front']
-        self.assertEqual(jpeg[:2], b'\xff\xd8')
-        self.assertLess(time.monotonic() - stamp, 1.0)
 
     def test_stale_camera_frame_fails(self):
         stream = cameras.CameraStream.__new__(cameras.CameraStream)

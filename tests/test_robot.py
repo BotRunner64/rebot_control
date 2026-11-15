@@ -45,23 +45,6 @@ class TargetTests(unittest.TestCase):
 
 @unittest.skipUnless(EE_AVAILABLE, "Install the ee dependency extra")
 class RobotTests(unittest.TestCase):
-    def test_invalid_right_target_and_collision_never_publish_either_arm(self):
-        with control.Robot(hardware=False, stop=threading.Event()) as robot:
-            previous = {side: q.copy() for side, q in robot.sim_q.items()}
-            state = robot.state()["state"]
-            state[12] = .1
-            invalid = state.copy()
-            invalid[16:25] = [0.] * 9
-            with self.assertRaises(ValueError):
-                robot.command(invalid)
-            with patch.object(robot.iks["right"], "has_self_collision", return_value=True):
-                self.assertFalse(robot.command(state))
-            for side in SIDES:
-                np.testing.assert_array_equal(robot.sim_q[side], previous[side])
-            self.assertTrue(robot.command(state))
-            self.assertFalse(robot.stop.is_set())
-            self.assertEqual(robot.sim_q["left"][6], .1)
-
     # Relative start pose of both arms; OPEN_START keeps the gripper off its closed limit.
     START = (0., .5, 1., 0., .1, 0., 0.)
     OPEN_START = (0., .5, 1., 0., .1, 0., .1)
@@ -84,7 +67,7 @@ class RobotTests(unittest.TestCase):
         self.factory_calls = []
         self.addCleanup(patch.stopall)
         patch.object(control, "select_arms", side_effect=select).start()
-        robot = control.Robot(hardware=True, stop=threading.Event(), bus_factory=factory)
+        robot = control.Robot(stop=threading.Event(), bus_factory=factory)
         return robot, virtual, selected
 
     def test_both_arms_are_verified_before_either_is_enabled(self):

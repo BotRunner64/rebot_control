@@ -1,4 +1,4 @@
-"""Run asynchronous dual-arm control with a remote policy server."""
+"""Control both physical arms and grippers from a remote policy server."""
 
 import argparse
 import math
@@ -12,11 +12,8 @@ def parser(prog=None):
     result.add_argument("--host", default="127.0.0.1", help="Policy server address")
     result.add_argument("--port", type=int, default=8000)
     result.add_argument("--instruction", required=True)
-    result.add_argument("--hardware", action="store_true", help="Enable physical dual-arm control; default is simulation")
-    cameras = result.add_mutually_exclusive_group(required=True)
-    cameras.add_argument("--camera", action="append", metavar="NAME=DEVICE",
-                         help="Repeat once per camera stream the policy requires")
-    cameras.add_argument("--mock-cameras", action="store_true", help="Synthetic images for simulation tests")
+    result.add_argument("--camera", action="append", metavar="NAME=DEVICE", required=True,
+                        help="Repeat once per camera stream the policy requires")
     result.add_argument("--replan-steps", type=int, default=16, help="Request a new chunk every N control periods (30 Hz)")
     result.add_argument("--request-timeout", type=float, default=1., help="Bound each socket operation in seconds")
     result.add_argument("--camera-max-age", type=float, default=.25)
@@ -40,8 +37,8 @@ def main(argv=None, prog=None):
         value = getattr(args, key)
         if value is not None and (not math.isfinite(value) or value <= 0):
             cli.error(f"{key.replace('_', '-')} must be finite and positive")
-    if args.gripper_open_deg > 270 or (args.hardware and args.mock_cameras):
-        cli.error("gripper opening must be <=270 degrees; hardware requires real cameras")
+    if args.gripper_open_deg > 270:
+        cli.error("gripper opening must be at most 270 degrees")
 
     from rebot.policy.client import run
 

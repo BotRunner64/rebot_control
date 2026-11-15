@@ -1,6 +1,5 @@
 """Latest JPEG camera snapshots; camera reads never run on the control thread."""
 
-import io
 import math
 from pathlib import Path
 import socket
@@ -96,43 +95,32 @@ class CameraStream:
 class PolicyCameras:
     """Exactly the named camera streams a policy requires; snapshot() -> {name: (jpeg, acquired_at)}."""
 
-    def __init__(self, cameras, names, *, mock=False, max_age=.25):
+    def __init__(self, cameras, names, *, max_age=.25):
+        from rebot.data.recording import parse_cameras
+
         self.streams = []
-        self.names, self.mock, self.max_age = tuple(names), mock, max_age
-        self.sources = self.mock_jpeg = None
-        if mock:
-            from PIL import Image
-
-            buffer = io.BytesIO()
-            Image.new("RGB", (640, 480)).save(buffer, format="JPEG")
-            self.mock_jpeg = buffer.getvalue()
-        else:
-            from rebot.data.recording import parse_cameras
-
-            self.sources = parse_cameras(cameras or [])
-            if set(self.sources) != set(self.names):
-                raise ValueError(f"Name exactly the cameras this policy requires: {', '.join(self.names)}.")
-            if len({str(Path(p).resolve()) for p in self.sources.values()}) != len(self.sources):
-                raise ValueError("Policy camera devices must be distinct.")
+        self.names, self.max_age = tuple(names), max_age
+        self.sources = parse_cameras(cameras or [])
+        if set(self.sources) != set(self.names):
+            raise ValueError(f"Name exactly the cameras this policy requires: {', '.join(self.names)}.")
+        if len({str(Path(p).resolve()) for p in self.sources.values()}) != len(self.sources):
+            raise ValueError("Policy camera devices must be distinct.")
 
     def __enter__(self):
         try:
-            if not self.mock:
-                for name in self.names:
-                    self.streams.append(CameraStream(self.sources[name]))
-                deadline = time.monotonic() + 10.
-                for stream in self.streams:
-                    if not stream.ready.wait(max(0., deadline - time.monotonic())):
-                        raise TimeoutError(f"No first frame from {stream.source} within 10 seconds.")
-                self.snapshot()
+            for name in self.names:
+                self.streams.append(CameraStream(self.sources[name]))
+            deadline = time.monotonic() + 10.
+            for stream in self.streams:
+                if not stream.ready.wait(max(0., deadline - time.monotonic())):
+                    raise TimeoutError(f"No first frame from {stream.source} within 10 seconds.")
+            self.snapshot()
             return self
         except BaseException:
             self.__exit__()
             raise
 
     def snapshot(self):
-        if self.mock:
-            return {name: (self.mock_jpeg, time.monotonic()) for name in self.names}
         return {name: stream.snapshot(self.max_age) for name, stream in zip(self.names, self.streams)}
 
     def __exit__(self, *_):

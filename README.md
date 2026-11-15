@@ -49,7 +49,7 @@ rebot leader calibrate right
 | `rebot teleop` | Star Arm 遥操作实体双臂和夹爪 | 是 |
 | `rebot collect` | 遥操作并录制数据 | 是 |
 | `rebot ee` | 末端位姿控制（默认仿真，`--hardware` 上实机） | 仅 `--hardware` |
-| `rebot policy` | 连接远端策略服务做双臂控制（默认仿真） | 仅 `--hardware` |
+| `rebot policy` | 连接远端策略服务做双臂控制 | 是 |
 | `rebot identify` | 自动重力参数辨识 | 是 |
 | `rebot process` | 回放录制、切分 episode、标注 | 否 |
 | `rebot export` | 导出 LeRobot v3 数据集 | 否 |
