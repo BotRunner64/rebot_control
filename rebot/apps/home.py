@@ -27,7 +27,7 @@ HOME_TOLERANCE_RAD = 0.05
 HOME_SETTLE_S = 0.5
 
 
-def disable(config=ARM_BINDINGS, side="right", *, bus_factory=MotorBus):
+def disable(config=ARM_BINDINGS, side="both", *, bus_factory=MotorBus):
     """Disable all seven motors per selected arm and verify their stopped state."""
     bindings = select_arms(config, side, calibrated=False)
     print("HOME DISABLE: all seven motors per selected arm, including the gripper, "
@@ -57,7 +57,7 @@ def disable(config=ARM_BINDINGS, side="right", *, bus_factory=MotorBus):
     return success
 
 
-def home(config=ARM_BINDINGS, settings_path=CONTROL_SETTINGS, side="right", speed=HOME_SPEED,
+def home(config=ARM_BINDINGS, settings_path=CONTROL_SETTINGS, side="both", speed=HOME_SPEED,
          calibration=None, *, bus_factory=MotorBus, stop=None):
     """Move to the reference pose; True once every selected motor is confirmed disabled."""
     if not math.isfinite(speed) or speed <= 0:
@@ -140,7 +140,7 @@ def main(argv=None, prog=None):
     parser = argparse.ArgumentParser(prog=prog, description=__doc__)
     parser.add_argument("--config", type=Path, default=ARM_BINDINGS)
     parser.add_argument("--settings", type=Path, default=CONTROL_SETTINGS)
-    parser.add_argument("--side", choices=("left", "right", "both"), default="right")
+    parser.add_argument("--side", choices=("left", "right", "both"), default="both")
     parser.add_argument("--speed", type=float, default=HOME_SPEED, help="Peak planned joint speed in rad/s")
     parser.add_argument("--calibration", type=Path, help="Accepted robot-bound gravity calibration YAML")
     args = parser.parse_args(argv)

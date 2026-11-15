@@ -68,7 +68,7 @@ rebot process --dataset datasets/cup --output datasets/cup_processed
 rebot export  --dataset datasets/cup_processed --output datasets/cup_lerobot --repo-id local/cup
 
 # 用完后归位并卸力
-rebot home --side both
+rebot home
 ```
 
 ## 安全约定

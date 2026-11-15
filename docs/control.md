@@ -42,8 +42,8 @@ rebot guide --side both --duration 60
 ## 归位并卸力 `rebot home`
 
 ```bash
-rebot home --side right
-rebot home --side both --speed 0.1     # 峰值关节速度 rad/s，默认 0.3
+rebot home                              # 默认双臂；--side left|right 只归位一侧
+rebot home --speed 0.1                  # 峰值关节速度 rad/s，默认 0.3
 ```
 
 J1–J6 沿最小 jerk 轨迹回到软件零位。全部所选臂误差连续 0.5 秒小于 0.05 rad 后，**失能该臂全部 7 个电机（含夹爪）**。
