@@ -10,12 +10,14 @@ import os
 from pathlib import Path
 import select
 import signal
+import socket
 import struct
 import sys
+import threading
 import time
 
 from rebot.media.capture import choose_format, discover_cameras, fit_size
-from rebot.media.record_preview import PreviewPublisher
+from rebot.media.record_preview import PreviewPublisher, packet
 
 
 def report(kind, **values):
@@ -65,8 +67,18 @@ def decode_frame_count(Gst, path, *, timeout=20.):
 
 
 class CameraRecorder:
-    def __init__(self, Gst, source, output, timestamps, *, test_source=False, preview_socket=None):
+    """Record one camera, or with `jpeg_fd` the JPEG frames another process already captured from it.
+
+    Relayed frames arrive on that socket as length-prefixed `!d seconds + JPEG` packets and keep
+    their own acquisition timestamps, so the recording matches what the sender saw frame for frame.
+    """
+
+    def __init__(self, Gst, source, output, timestamps, *, test_source=False, preview_socket=None,
+                 jpeg_fd=None):
         self.Gst, self.output = Gst, Path(output)
+        self.frames = None if jpeg_fd is None else socket.socket(fileno=jpeg_fd)
+        self.origin_ns = None
+        self.finishing = False
         self.pipeline = None
         self.timestamps = None
         self.preview = None
@@ -83,9 +95,15 @@ class CameraRecorder:
                 except Exception as exc:
                     print(f"Camera preview disabled: {exc}", file=sys.stderr)
             self.timestamps = Path(timestamps).open("xb")
-            source_description = "videotestsrc is-live=true name=camera" if test_source else "v4l2src name=camera"
+            if self.frames is not None:
+                # Backpressure reaches the sender, which stops instead of silently dropping frames.
+                head = ("appsrc name=camera is-live=true format=time block=true max-buffers=8 max-bytes=0 "
+                        "caps=image/jpeg ! jpegdec")
+            else:
+                head = ("videotestsrc is-live=true name=camera" if test_source else "v4l2src name=camera") \
+                    + " ! capsfilter name=mode ! decodebin"
             self.pipeline = Gst.parse_launch(
-                source_description + " ! capsfilter name=mode ! decodebin ! videoconvert ! videoscale "
+                head + " ! videoconvert ! videoscale "
                 "! capsfilter name=record_size ! identity name=frames "
                 "! x264enc tune=zerolatency speed-preset=ultrafast bframes=0 pass=qual quantizer=23 bitrate=50000 "
                 "! video/x-h264,stream-format=avc,alignment=au ! mp4mux ! filesink name=output sync=false"
@@ -94,28 +112,70 @@ class CameraRecorder:
             self.pipeline.use_clock(clock)
             self.clock_offset = monotonic_offset(clock)
             camera = self.pipeline.get_by_name("camera")
-            if not test_source:
+            if self.frames is None and not test_source:
                 camera.set_property("device", source)
             self.pipeline.get_by_name("output").set_property("location", str(output))
             if self.pipeline.set_state(Gst.State.READY) == Gst.StateChangeReturn.FAILURE:
                 raise RuntimeError(f"Could not open camera {source}.")
-            selected = (Gst.Caps.from_string("video/x-raw,width=160,height=120,framerate=20/1")
-                        if test_source else choose_format(camera.get_static_pad("src").query_caps(None)))
-            self.pipeline.get_by_name("mode").set_property("caps", selected)
-            info = selected.get_structure(0)
-            # Fit within 960 pixels without cropping; I420 needs even dimensions.
-            width, height = fit_size(info.get_int("width")[1], info.get_int("height")[1], 960, 960)
+            if self.frames is not None:
+                # The sender already sized these frames; record them as they are.
+                size = ""
+                print(f"Camera {source}: relayed JPEG frames, H.264 CRF 23.", file=sys.stderr, flush=True)
+            else:
+                selected = (Gst.Caps.from_string("video/x-raw,width=160,height=120,framerate=20/1")
+                            if test_source else choose_format(camera.get_static_pad("src").query_caps(None)))
+                self.pipeline.get_by_name("mode").set_property("caps", selected)
+                info = selected.get_structure(0)
+                # Fit within 960 pixels without cropping; I420 needs even dimensions.
+                width, height = fit_size(info.get_int("width")[1], info.get_int("height")[1], 960, 960)
+                size = f",width={width},height={height}"
+                print(f"Camera {source}: {selected.to_string()}", file=sys.stderr, flush=True)
+                print(f"Recording {width}x{height}, H.264 CRF 23.", file=sys.stderr, flush=True)
             self.pipeline.get_by_name("record_size").set_property("caps", Gst.Caps.from_string(
-                f"video/x-raw,format=I420,width={width},height={height},pixel-aspect-ratio=1/1"))
-            print(f"Camera {source}: {selected.to_string()}", file=sys.stderr, flush=True)
-            print(f"Recording {width}x{height}, H.264 CRF 23.", file=sys.stderr, flush=True)
+                f"video/x-raw,format=I420{size},pixel-aspect-ratio=1/1"))
             self.pipeline.get_by_name("frames").get_static_pad("src").add_probe(
                 Gst.PadProbeType.BUFFER, self.on_frame)
             if self.pipeline.set_state(Gst.State.PLAYING) == Gst.StateChangeReturn.FAILURE:
                 raise RuntimeError(f"Could not start camera {source}.")
+            if self.frames is not None:
+                threading.Thread(target=self.relay, name="relayed-frames", daemon=True).start()
         except BaseException:
             self.close()
             raise
+
+    def relay(self):
+        Gst = self.Gst
+        source = self.pipeline.get_by_name("camera")
+        try:
+            while True:
+                try:
+                    payload = packet(self.frames, 4_000_000)
+                except ConnectionError:
+                    # The sender closes its end after the stop command; end the stream behind
+                    # every frame already queued, so none in flight is lost.
+                    deadline = time.monotonic() + 5.
+                    while not self.finishing:
+                        if time.monotonic() > deadline:
+                            raise
+                        time.sleep(.01)
+                    source.emit("end-of-stream")
+                    return
+                if len(payload) <= 8:
+                    raise ValueError("Incomplete relayed camera frame.")
+                acquired_ns = round(struct.unpack("!d", payload[:8])[0] * 1e9)
+                if self.origin_ns is None:
+                    self.origin_ns = previous = acquired_ns - Gst.SECOND // 30
+                if acquired_ns <= previous:
+                    raise ValueError("Relayed camera timestamps did not advance.")
+                buffer = Gst.Buffer.new_wrapped(payload[8:])
+                buffer.pts = buffer.dts = acquired_ns - self.origin_ns
+                # The muxer needs a duration for every frame, including the last one.
+                buffer.duration, previous = acquired_ns - previous, acquired_ns
+                if source.emit("push-buffer", buffer) != Gst.FlowReturn.OK:
+                    raise RuntimeError("Recording pipeline refused a relayed frame.")
+        except BaseException as exc:
+            if not self.finishing:
+                self.error = exc
 
     def on_frame(self, pad, info):
         Gst = self.Gst
@@ -127,7 +187,10 @@ class CameraRecorder:
             running_ns = event.parse_segment().to_running_time(Gst.Format.TIME, buffer.pts)
             if running_ns == Gst.CLOCK_TIME_NONE:
                 raise ValueError("Camera frame timestamp is outside its TIME segment.")
-            timestamp = int(self.pipeline.get_base_time() + running_ns + self.clock_offset)
+            # Relayed frames carry their acquisition time as an offset from the first frame.
+            origin = (self.origin_ns if self.frames is not None
+                      else self.pipeline.get_base_time() + self.clock_offset)
+            timestamp = int(origin + running_ns)
             self.last_frame_at = time.monotonic()
             if self.preview is not None:
                 # Hand off only a buffer reference. Copying and socket I/O stay off this thread.
@@ -185,9 +248,10 @@ class CameraRecorder:
                         self.start_ns = command["timestamp_ns"]
                     elif command["command"] == "stop":
                         self.stop_ns = command["timestamp_ns"]
-                        finishing = True
+                        finishing = self.finishing = True
                         deadline = time.monotonic() + 15.
-                        if not self.pipeline.send_event(Gst.Event.new_eos()):
+                        # A relayed stream ends itself once its sender has closed.
+                        if self.frames is None and not self.pipeline.send_event(Gst.Event.new_eos()):
                             raise RuntimeError("Camera pipeline refused EOS.")
                     else:
                         raise ValueError("Invalid camera recording command.")
@@ -222,6 +286,8 @@ class CameraRecorder:
             self.timestamps.close()
         if self.preview is not None:
             self.preview.close()
+        if self.frames is not None:
+            self.frames.close()
 
 
 def main():
@@ -232,6 +298,8 @@ def main():
     parser.add_argument("--timestamps", type=Path)
     parser.add_argument("--test-source", action="store_true", help="Use a synthetic camera for offline tests")
     parser.add_argument("--preview-socket", type=Path, help="Best-effort viewer socket")
+    parser.add_argument("--jpeg-fd", type=int,
+                        help="Record timestamped JPEG frames relayed on this socket instead of opening the camera")
     args = parser.parse_args()
     if not args.discover and any(value is None for value in (args.source, args.output, args.timestamps)):
         parser.error("recording requires --source, --output, and --timestamps")
@@ -247,7 +315,7 @@ def main():
             report("cameras", sources=sources)
             return 0
         recorder = CameraRecorder(Gst, args.source, args.output, args.timestamps, test_source=args.test_source,
-                                  preview_socket=args.preview_socket)
+                                  preview_socket=args.preview_socket, jpeg_fd=args.jpeg_fd)
         recorder.run()
         return 0
     except Exception as exc:

@@ -146,7 +146,41 @@ rebot policy --host 127.0.0.1 --port 8000 \
 - 每 16 个控制周期（`--replan-steps`）在后台请求下一段动作，等待时继续执行当前段，过期的目标按时间戳跳过。
 - 请求超时（`--request-timeout`，默认 1 s）、相机过期（`--camera-max-age` 0.25 s）、相机与状态时间差过大（`--camera-max-skew` 0.10 s）、非法动作、CAN 故障都会停止并保持。
 - `--duration 10` 限制运行时长。`--gripper-open-deg` 应与采集时一致（默认 270）。
+- `--record datasets/cap_debug` 把这次运行录成一个 episode，方便排查，见下。
+
+### 录制运行过程 `--record`
+
+```bash
+rebot policy --port 8000 --instruction "Unscrew the bottle cap" \
+  --camera top=4 --camera left_wrist=0 --camera right_wrist=2 \
+  --record datasets/cap_debug
+```
+
+输出与 `rebot collect` [格式相同](data-format.md)，每次运行往数据集追加一个 episode，可以直接用 `rebot process` 回放、`rebot export` 导出。
+
+- **录的是策略看到的东西**：视频就是发给策略的那几路图像（最长边 640 px，逐帧时间戳与观测里的一致），状态是实测的末端位姿和夹爪开合度（按 `--gripper-open-deg` 归一化）。
+- **另外带一份调试数据**，在 episode 的 `debug/` 目录下，见下表。它不属于[数据格式](data-format.md)，`rebot process` 和 `rebot export` 不读它；`rebot collect` 的采集数据里没有它。
+- 录制不改变策略的输入；录制进程就绪后才使能电机。
+- 结束后要封装和校验视频，**看到 `Saved episode ...` 才算保存成功**。此时双臂已处于保持状态。
+- 控制中途出错停止（推理超时、动作用尽等）时，这段录制**照样保存**，再报告原始错误。
+- 录制本身出错（写盘、编码跟不上）会停止控制并保持，数据留在 `<dataset>/.pending/`。
 - 消息格式和如何接入新策略见 [策略链路协议](policy-link.md)。
+
+#### 调试数据 `debug/`
+
+| 文件 | 频率 | 内容 |
+| --- | --- | --- |
+| `left_joints.parquet`、`right_joints.parquet` | 每个伺服周期（250 Hz） | 7 个电机的实测 `position`、`velocity`、`torque`，以及这一周期下发的关节目标 `target` 和力矩 `feedforward` |
+| `targets.parquet` | 每个控制周期（30 Hz） | 交给机械臂的末端目标 `left_pose`/`right_pose` 和夹爪目标 `left_openness`/`right_openness`，它来自第几个动作块的第几行（`chunk`、`row`），以及是否真的下发（`sent`） |
+| `chunks.parquet` | 每次推理 | 完整的动作块：四路流各自的目标和相对观测时刻的时间偏移，观测时刻、推理耗时、收到时已过期的行数 `first_row` |
+| `run.json` | 每次运行 | 命令行参数、策略服务的元数据、`control.yaml` 和 `gripper.yaml` 的内容、关节增益、时序统计、停止原因或错误 |
+
+- 所有 `*timestamp_ns` 与 `state/`、`rgb/` 同一个时间原点，可以直接按时间对齐。
+- 关节角是相对软件零位的弧度，夹爪（第 7 个）是电机角；位姿和开合度的定义与[数据格式](data-format.md)相同。
+- `torque` 是电机上报的力矩。`feedforward` 对前 6 轴是重力前馈，电机在此之上再加自己的 PD 项；对夹爪是上位机算出的全部力矩（已限幅）。
+- `targets` 减去同一时刻的 `state` 就是末端跟踪误差。`sent` 为假表示目标会自碰撞而被拒绝，机械臂保持上一个目标。
+- `chunks` 里第 `chunk` 行的 `left_eef[row]` 就是 `targets` 里那一行的 `left_pose`；每个动作块只有 `first_row` 之后、下一块到来之前的那几行被执行。
+- 策略还没返回第一个动作块之前不下发目标，`targets` 也没有行。
 
 ## 重力辨识 `rebot identify`
 

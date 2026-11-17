@@ -20,6 +20,8 @@ def parser(prog=None):
     result.add_argument("--camera-max-skew", type=float, default=.10, help="Maximum camera/state skew in seconds")
     result.add_argument("--duration", type=float, help="Stop after this many seconds")
     result.add_argument("--gripper-open-deg", type=float, default=270., help="Physical full-open motor angle")
+    result.add_argument("--record", type=Path, metavar="DATASET",
+                        help="Also record this run as one episode of a `rebot collect` dataset")
     result.add_argument("--config", type=Path, default=ARM_BINDINGS)
     result.add_argument("--settings", type=Path, default=CONTROL_SETTINGS)
     result.add_argument("--gripper-settings", type=Path, default=GRIPPER_SETTINGS)

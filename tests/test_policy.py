@@ -4,6 +4,8 @@ from contextlib import contextmanager, redirect_stdout
 import io
 import os
 from pathlib import Path
+import socket
+import struct
 import subprocess
 import sys
 import tempfile
@@ -97,6 +99,115 @@ class CLITests(unittest.TestCase):
         self.assertEqual(result, 2)
         robot.assert_not_called()
         capture.assert_not_called()
+
+
+class RecordTests(unittest.TestCase):
+    """`--record` wiring with every device replaced; the recorder itself is covered in test_recording."""
+
+    def run_recorded(self, *, loop=None, robot_error=None, finish_error=None):
+        events, runs = [], []
+        self.runs = runs
+
+        class Debug:
+            def write_run(self, info):
+                events.append("run info")
+                runs.append(info)
+
+        class Session:
+            feeds, started, directory = {"top": object()}, False, Path("pending")
+
+            def __init__(self, options, references, *, relay, debug):
+                self.options, self.references, self.relay = options, references, relay
+                self.debug = Debug() if debug else None
+
+            def ready(self):
+                events.append("ready")
+                return True
+
+            def start(self):
+                events.append("start")
+                self.started = True
+
+            def finish(self):
+                events.append("finish")
+                if finish_error is not None:
+                    raise finish_error
+
+            def close(self):
+                events.append("close")
+
+            def publish(self, side, states, command=None): pass
+            def check(self): pass
+
+        @contextmanager
+        def device(name, error=None):
+            if error is not None:
+                raise error
+            events.append(name)
+            try:
+                yield name
+            finally:
+                events.append(f"{name} closed")
+
+        client = SlowClient()
+        client.metadata = link.metadata()
+        binding = type("Binding", (), {"reference": [.2] * 7})
+        with patch.object(policy, "connect_policy", return_value=client), \
+                patch.object(cameras, "PolicyCameras", side_effect=lambda *a, **k: device("cameras")) as capture, \
+                patch("rebot.runtime.robot.Robot", side_effect=lambda **k: device("robot", robot_error)) as robot, \
+                patch("rebot.bindings.select_arms", return_value={"left": binding, "right": binding}), \
+                patch("rebot.data.recording.RecordingSession", Session), \
+                patch.object(policy, "control_loop", side_effect=loop or (lambda *a, **k: {"commands": 1})) as control, \
+                redirect_stdout(io.StringIO()), patch("sys.stderr", new_callable=io.StringIO):
+            try:
+                result = policy.run(host="127.0.0.1", port=1, instruction="unscrew", gripper_open_deg=200.,
+                                    camera=["top=4", "left_wrist=0", "right_wrist=2"], record=Path("runs/debug"))
+            except Exception as exc:
+                result = exc
+        return result, events, capture, robot, control
+
+    def test_recorders_are_ready_before_motors_and_saved_after_both_arms_hold(self):
+        result, events, capture, robot, control = self.run_recorded()
+        self.assertEqual(result, {"commands": 1})
+        self.assertEqual(events, ["cameras", "ready", "robot", "start", "robot closed", "cameras closed",
+                                  "run info", "finish", "close"])
+        self.assertIs(control.call_args.kwargs["log"], control.call_args.kwargs["check"].__self__.debug)
+        info = self.runs[0]
+        self.assertEqual(info["arguments"]["replan_steps"], 16)
+        self.assertEqual(info["arguments"]["instruction"], "unscrew")
+        self.assertEqual(info["policy"]["protocol"], "rebot-policy-link/1")
+        self.assertEqual(len(info["arm_kp"]), 6)
+        self.assertIn("torque_limit_nm", info["gripper_settings"])
+        self.assertEqual((info["report"], info["error"]), ({"commands": 1}, None))
+        session = control.call_args.kwargs["check"].__self__
+        self.assertTrue(session.relay)
+        self.assertEqual(session.options.dataset, Path("runs/debug"))
+        self.assertEqual(session.options.instruction, "unscrew")
+        self.assertEqual(session.options.gripper_open_deg, 200.)
+        self.assertEqual(session.options.cameras, {"top": "/dev/video4", "left_wrist": "/dev/video0",
+                                                   "right_wrist": "/dev/video2"})
+        self.assertEqual(set(session.references), {"left", "right"})
+        self.assertIs(capture.call_args.kwargs["sinks"], session.feeds)
+        self.assertEqual(robot.call_args.kwargs["on_feedback"], session.publish)
+
+    def test_a_failed_run_is_still_saved_and_reports_the_control_failure(self):
+        def exhausted(*args, **kwargs):
+            raise TimeoutError("Action buffer exhausted")
+
+        result, events, *_ = self.run_recorded(loop=exhausted)
+        self.assertIsInstance(result, TimeoutError)
+        self.assertEqual(events[-5:], ["robot closed", "cameras closed", "run info", "finish", "close"])
+        self.assertEqual(self.runs[0]["error"], "TimeoutError: Action buffer exhausted")
+        # A recording that cannot be saved must not hide why control stopped.
+        result, events, *_ = self.run_recorded(loop=exhausted, finish_error=RuntimeError("camera died"))
+        self.assertIsInstance(result, TimeoutError)
+        result, events, *_ = self.run_recorded(finish_error=RuntimeError("camera died"))
+        self.assertIsInstance(result, RuntimeError)
+
+    def test_a_startup_failure_publishes_nothing(self):
+        result, events, *_ = self.run_recorded(robot_error=ValueError("identity mismatch"))
+        self.assertIsInstance(result, ValueError)
+        self.assertEqual(events, ["cameras", "ready", "cameras closed", "close"])
 
 
 class TimelineTests(unittest.TestCase):
@@ -263,6 +374,14 @@ class AsyncTests(unittest.TestCase):
     def test_blocked_targets_do_not_end_async_inference(self):
         client = SlowClient(.02)
         stop = threading.Event()
+        chunks, targets = [], []
+
+        class Log:
+            def chunk(self, chunk, observed_at, accepted_at, latency, first_row):
+                chunks.append((observed_at, accepted_at, first_row, set(chunk)))
+
+            def target(self, now, values, chunk, row, sent):
+                targets.append((now, np.array(values), chunk, row, sent))
 
         class Robot:
             calls = 0
@@ -278,11 +397,21 @@ class AsyncTests(unittest.TestCase):
         with redirect_stdout(io.StringIO()):
             report = policy.control_loop(robot, client,
                 lambda: (observation(), time.monotonic()), stop,
-                duration=.5, replan_steps=3)
+                duration=.5, replan_steps=3, log=Log())
         self.assertGreaterEqual(client.calls, 3)
         self.assertGreater(report["commands"], 0)
         self.assertLess(report["commands"], robot.calls)
         self.assertFalse(stop.is_set())
+        # The debug log sees every accepted chunk and every target, including refused ones.
+        self.assertGreaterEqual(len(chunks), 3)
+        self.assertTrue(all(observed < accepted and names == set(policy.STREAMS)
+                            for observed, accepted, _, names in chunks))
+        self.assertEqual(len(targets), robot.calls)
+        self.assertEqual([sent for *_, sent in targets], [False] * 5 + [True] * (robot.calls - 5))
+        self.assertEqual(sum(sent for *_, sent in targets), report["commands"])
+        self.assertEqual(targets[0][2], 0)
+        self.assertEqual(targets[-1][2], len(chunks) - 1)
+        self.assertEqual(targets[0][1].shape, (26,))
 
     def test_inference_failure_sets_stop_and_is_reported(self):
         client = SlowClient(.02, fail=True)
@@ -327,6 +456,24 @@ class CameraTests(unittest.TestCase):
                 stream.close()
             self.assertIsNotNone(stream.process.poll())
             self.assertFalse(stream.thread.is_alive())
+
+    def test_every_captured_sample_is_also_relayed_to_a_sink(self):
+        script = "import argparse,socket,struct,time\np=argparse.ArgumentParser();p.add_argument('--source');p.add_argument('--socket-fd',type=int)\na=p.parse_args();s=socket.socket(fileno=a.socket_fd)\nfor i in range(3):\n payload=struct.pack('!d',time.monotonic())+b'\\xff\\xd8'+bytes([i])\n s.sendall(struct.pack('!I',len(payload))+payload)\ntime.sleep(5)\n"
+        sink, receiver = socket.socketpair()
+        receiver.settimeout(3.)
+        with tempfile.TemporaryDirectory() as directory, sink, receiver:
+            (Path(directory) / "fake_policy_capture.py").write_text(script)
+            with patch.object(cameras, "CAPTURE_MODULE", "fake_policy_capture"), \
+                    patch.dict(os.environ, {"PYTHONPATH": directory}):
+                stream = cameras.CameraStream("synthetic", sink)
+            try:
+                payloads = [cameras.packet(receiver, 100) for _ in range(3)]
+                self.assertEqual([payload[8:] for payload in payloads],
+                                 [b"\xff\xd8" + bytes([i]) for i in range(3)])
+                frame, stamp = stream.snapshot(1.)
+                self.assertEqual(struct.unpack("!d", payloads[2][:8])[0], stamp)
+            finally:
+                stream.close()
 
     def test_capture_child_failure_is_reported_without_waiting_ten_seconds(self):
         with tempfile.TemporaryDirectory() as directory:

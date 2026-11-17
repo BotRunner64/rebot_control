@@ -11,6 +11,7 @@ from pathlib import Path
 import queue
 import re
 import signal
+import socket
 import struct
 import subprocess
 import sys
@@ -222,7 +223,9 @@ def discover_cameras():
 
 
 class CameraProcess:
-    def __init__(self, source, directory, name, *, test=False, preview_socket=None):
+    """One recorder child. With `jpeg_fd` it records frames relayed on that socket, not the device."""
+
+    def __init__(self, source, directory, name, *, test=False, preview_socket=None, jpeg_fd=None):
         self.log = (Path(directory) / f"{name}.log").open("wb")
         self.process = None
         self.buffer, self.ready, self.done = b"", False, False
@@ -232,10 +235,12 @@ class CameraProcess:
             arguments.append("--test-source")
         if preview_socket is not None:
             arguments.extend(["--preview-socket", str(preview_socket)])
+        if jpeg_fd is not None:
+            arguments.extend(["--jpeg-fd", str(jpeg_fd)])
         command, env = system_python("rebot.media.recorder", *arguments)
         try:
             self.process = subprocess.Popen(command, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                            stderr=self.log)
+                                            stderr=self.log, pass_fds=() if jpeg_fd is None else (jpeg_fd,))
             os.set_blocking(self.process.stdout.fileno(), False)
         except BaseException:
             self.log.close()
@@ -281,13 +286,17 @@ class RecordingSession:
     """Stage an episode outside episodes/ and publish only after successful finalization.
 
     `references` maps each side to its seven calibrated zero positions in radians.
+    With `relay`, no camera device is opened: the caller already captures the cameras and
+    sends every frame to `feeds[name]` as a length-prefixed `!d seconds + JPEG` packet.
+    With `debug`, the episode also gets a `debug/` directory (see `rebot.data.debug`); the
+    caller fills it through `publish(..., command)` and `self.debug`.
     """
 
-    def __init__(self, options, references, *, camera_factory=CameraProcess):
+    def __init__(self, options, references, *, camera_factory=CameraProcess, relay=False, debug=False):
         options.validate()
         schemas()  # Fail before connecting to or enabling hardware.
-        self.options, self.cameras = options, []
-        self.viewer = None
+        self.options, self.cameras, self.feeds = options, [], {}
+        self.viewer = self.debug = None
         self.process = self.status = self.samples = self.lock = None
         self.writer_ready = self.writer_done = self.started = self.closed = False
         self.cameras_stopped = False
@@ -315,14 +324,28 @@ class RecordingSession:
                 args=(self.directory, self.samples, child_status, references, options.gripper_open_deg))
             self.process.start()
             child_status.close()
+            if debug:
+                from rebot.data.debug import DebugLog
+
+                self.debug = DebugLog(self.directory / "debug", references)
             if options.camera_viewer:
                 try:
                     self.viewer = RecordingViewer(options.cameras)
                 except Exception as exc:
                     print(f"Camera preview unavailable; continuing recording: {exc}", file=sys.stderr)
             for name, source in options.cameras.items():
-                preview = {"preview_socket": self.viewer.paths[name]} if self.viewer is not None else {}
-                self.cameras.append(camera_factory(source, self.directory / "rgb", name, **preview))
+                extra = {"preview_socket": self.viewer.paths[name]} if self.viewer is not None else {}
+                child = None
+                if relay:
+                    self.feeds[name], child = socket.socketpair()
+                    # A stalled recorder fails the sender within a second instead of blocking it.
+                    self.feeds[name].settimeout(1.)
+                    extra["jpeg_fd"] = child.fileno()
+                try:
+                    self.cameras.append(camera_factory(source, self.directory / "rgb", name, **extra))
+                finally:
+                    if child is not None:
+                        child.close()
         except BaseException:
             self.close()
             raise
@@ -350,12 +373,25 @@ class RecordingSession:
             self.writer_done |= record["type"] == "done"
         if self.process.exitcode is not None and (not finishing or not self.writer_done):
             raise RuntimeError(f"State recorder exited unexpectedly ({self.process.exitcode}).")
+        if self.debug is not None:
+            self.debug.check(finishing=finishing)
         for camera in self.cameras:
             camera.check(finishing=finishing)
 
     def ready(self):
         self.check()
-        return self.writer_ready and all(camera.ready for camera in self.cameras)
+        return (self.writer_ready and (self.debug is None or self.debug.ready)
+                and all(camera.ready for camera in self.cameras))
+
+    def publish(self, side, states, command=None):
+        """Feedback hook for an in-process servo loop; ignored until the recording starts.
+
+        `command` is the servo command behind these replies; it only feeds the debug streams.
+        """
+        if self.started:
+            publish_feedback(self.samples, side, states)
+            if self.debug is not None and command is not None:
+                self.debug.joints(side, states, command)
 
     def start(self):
         timestamp = time.monotonic_ns()
@@ -369,6 +405,8 @@ class RecordingSession:
             timestamp = time.monotonic_ns()
             for camera in self.cameras:
                 camera.send("stop", timestamp)
+            for feed in self.feeds.values():
+                feed.shutdown(socket.SHUT_WR)
             self.cameras_stopped = True
 
     def finish(self, *, timeout=300.):
@@ -386,8 +424,9 @@ class RecordingSession:
                 raise TimeoutError("Episode finalization timed out; pending data was retained.")
             time.sleep(.01)
         self.process.join(2.)
+        extra = [] if self.debug is None else self.debug.finish(deadline)
         metadata = finalize_episode(self.directory, self.episode_id, list(self.options.cameras),
-                                    self.options.instruction)
+                                    self.options.instruction, extra=extra)
         destination = self.root / "episodes" / self.episode_id
         destination.parent.mkdir(exist_ok=True)
         metadata_path = self.root / ".pending" / f"{self.episode_id}.jsonl.tmp"
@@ -414,8 +453,12 @@ class RecordingSession:
         self.closed = True
         for camera in self.cameras:
             camera.close()
+        for feed in self.feeds.values():
+            feed.close()
         if self.viewer is not None:
             self.viewer.close()
+        if self.debug is not None:
+            self.debug.close()
         if self.process is not None and self.process.pid is not None:
             if self.process.is_alive():
                 self.process.terminate()
@@ -432,8 +475,12 @@ class RecordingSession:
             self.lock.close()
 
 
-def finalize_episode(directory, episode_id, cameras, instruction):
-    """Normalize all streams together, using bounded batches and integer subtraction."""
+def finalize_episode(directory, episode_id, cameras, instruction, extra=()):
+    """Normalize all streams together, using bounded batches and integer subtraction.
+
+    `extra` tables are not validated and do not influence the time origin; every column of
+    theirs named `*timestamp_ns` is shifted to the episode's origin like the contract streams.
+    """
     import pyarrow as pa
     import pyarrow.compute as pc
     import pyarrow.parquet as pq
@@ -479,14 +526,15 @@ def finalize_episode(directory, episode_id, cameras, instruction):
     origin, end = min(first), max(last) - min(first)
     if end <= 0:
         raise ValueError("An episode must have a positive sampled duration.")
-    for path in paths:
+    for path in [*paths, *map(Path, extra)]:
         source = pq.ParquetFile(path)
         temporary = path.with_suffix(".normalized")
         with pq.ParquetWriter(temporary, source.schema_arrow, compression="zstd") as writer:
             for batch in source.iter_batches(batch_size=BATCH_SIZE):
-                index = batch.schema.get_field_index("timestamp_ns")
                 columns = list(batch.columns)
-                columns[index] = pc.subtract(columns[index], pa.scalar(origin, type=pa.int64()))
+                for index, name in enumerate(batch.schema.names):
+                    if name.endswith("timestamp_ns"):
+                        columns[index] = pc.subtract(columns[index], pa.scalar(origin, type=pa.int64()))
                 writer.write_batch(pa.RecordBatch.from_arrays(columns, schema=batch.schema))
         os.replace(temporary, path)
     for camera in cameras:

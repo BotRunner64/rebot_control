@@ -16,8 +16,10 @@ CAPTURE_MODULE = "rebot.media.policy_capture"
 
 
 class CameraStream:
-    def __init__(self, source):
-        self.source = source
+    """Latest frame of one capture child; `sink` also receives every sample packet as it arrives."""
+
+    def __init__(self, source, sink=None):
+        self.source, self.sink = source, sink
         self.lock = threading.Lock()
         self.frame = self.error = None
         self.acquired_at = 0.
@@ -57,6 +59,9 @@ class CameraStream:
                 if payload[8:10] != b"\xff\xd8":
                     raise ValueError("Camera sample is not a JPEG image.")
                 self.connection.settimeout(1.)
+                if self.sink is not None:
+                    self.sink.sendall(struct.pack("!I", len(payload)))
+                    self.sink.sendall(payload)
                 with self.lock:
                     self.frame, self.acquired_at = payload[8:], acquired
                 self.ready.set()
@@ -93,13 +98,16 @@ class CameraStream:
 
 
 class PolicyCameras:
-    """Exactly the named camera streams a policy requires; snapshot() -> {name: (jpeg, acquired_at)}."""
+    """Exactly the named camera streams a policy requires; snapshot() -> {name: (jpeg, acquired_at)}.
 
-    def __init__(self, cameras, names, *, max_age=.25):
+    `sinks` maps camera names to sockets that receive every captured frame, e.g. a recording.
+    """
+
+    def __init__(self, cameras, names, *, max_age=.25, sinks=None):
         from rebot.data.recording import parse_cameras
 
         self.streams = []
-        self.names, self.max_age = tuple(names), max_age
+        self.names, self.max_age, self.sinks = tuple(names), max_age, sinks or {}
         self.sources = parse_cameras(cameras or [])
         if set(self.sources) != set(self.names):
             raise ValueError(f"Name exactly the cameras this policy requires: {', '.join(self.names)}.")
@@ -109,7 +117,7 @@ class PolicyCameras:
     def __enter__(self):
         try:
             for name in self.names:
-                self.streams.append(CameraStream(self.sources[name]))
+                self.streams.append(CameraStream(self.sources[name], self.sinks.get(name)))
             deadline = time.monotonic() + 10.
             for stream in self.streams:
                 if not stream.ready.wait(max(0., deadline - time.monotonic())):

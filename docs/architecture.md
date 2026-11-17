@@ -43,7 +43,7 @@ rebot/
 │   ├── ipc.py          多进程共享的“最新一帧”与心跳
 │   └── timing.py       定频循环与时序统计
 ├── viewer/             server.py（HTTP+WebSocket）、scene.py、ee.py、dual.py
-├── data/               recording.py、process.py、previews.py、reset_detection.py、lerobot.py
+├── data/               recording.py、debug.py、process.py、previews.py、reset_detection.py、lerobot.py
 ├── media/              recorder.py、capture.py、mjpeg.py、record_preview.py、video_tools.py、policy_capture.py
 ├── policy/             client.py（动作时间线、异步推理）、cameras.py
 └── apps/               arm_setup、leader_setup、leader_view、mirror、guide、home、teleop、

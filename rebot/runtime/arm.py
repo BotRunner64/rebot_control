@@ -92,7 +92,7 @@ class Arm:
             self.servo_kp[6] = self.servo_kd[6] = 0.
         self._zero = np.zeros(self.count)
         self.bus = self.raw = None
-        self.sampled_at = self.acquired_at = None
+        self.sampled_at = self.acquired_at = self.commanded = None
 
     # --- lifecycle -----------------------------------------------------------
 
@@ -242,6 +242,8 @@ class Arm:
             return False
         if self._position_command(target, torque, began, host_gripper=True) is None:
             return False
+        # What the latest replies answer to, for anyone logging the servo cycle.
+        self.commanded = {"target": q.copy(), "torque": np.array(torque, dtype=float)}
         if self._stopped():
             return False
         # Each MIT command already returns position; avoid extra parameter queries.

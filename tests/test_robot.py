@@ -141,6 +141,32 @@ class RobotTests(unittest.TestCase):
         self.assertEqual(set(state["acquired_at"]), set(SIDES))
         self.assertEqual(state["observed_at"], min(state["acquired_at"].values()))
 
+    def test_every_servo_cycle_reports_raw_feedback_of_all_seven_motors(self):
+        robot, virtual, _ = self.hardware(self.OPEN_START)
+        received = {side: [] for side in SIDES}
+        commands = {}
+
+        def record(side, states, command):
+            received[side].append(states)
+            commands[side] = command
+
+        robot.on_feedback = record
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            with robot:
+                time.sleep(.1)
+        for side in SIDES:
+            self.assertGreater(len(received[side]), 5)
+            states = received[side][-1]
+            self.assertEqual(len(states), 7)
+            # Raw motor angles, as the recorder expects: the calibrated reference is not removed.
+            np.testing.assert_allclose([state["position"] for state in states], .2, atol=2e-3)
+            self.assertTrue(all(type(state["received_at_ns"]) is int for state in states))
+            # The command behind the replies: joint target relative to the zero, torque per motor.
+            self.assertEqual(commands[side]["target"].shape, (7,))
+            self.assertEqual(commands[side]["torque"].shape, (7,))
+            self.assertTrue(np.all(np.isfinite(commands[side]["target"])))
+            self.assertTrue(np.all(np.isfinite(commands[side]["torque"])))
+
     def test_hardware_rejection_of_the_right_target_never_moves_the_left_arm(self):
         robot, virtual, _ = self.hardware(self.OPEN_START)
         with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):

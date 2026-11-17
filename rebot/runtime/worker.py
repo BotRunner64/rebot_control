@@ -16,10 +16,12 @@ class ArmWorker:
 
     Following YAM's cached-command architecture, IK and rendering never touch CAN:
     they publish the newest target with `command()` and read `snapshot()`.
+    `on_feedback(side, states, command)` receives, on the servo thread, every cycle's motor
+    replies and the command they answer: the joint `target` and the commanded `torque`.
     """
 
-    def __init__(self, arm, stop, hz=SERVO_HZ):
-        self.arm, self.stop, self.hz = arm, stop, hz
+    def __init__(self, arm, stop, hz=SERVO_HZ, on_feedback=None):
+        self.arm, self.stop, self.hz, self.on_feedback = arm, stop, hz, on_feedback
         self.lock = threading.Lock()
         self.target = arm.q.copy()
         self.measured = arm.q.copy()
@@ -64,6 +66,8 @@ class ArmWorker:
                 with self.lock:
                     self.measured = self.arm.q.copy()
                     self.acquired_at = self.arm.acquired_at
+                if self.on_feedback is not None:
+                    self.on_feedback(self.arm.side, self.arm.feedback_states(), self.arm.commanded)
                 timing.complete(began, time.monotonic())
                 timing.pace(self.done)
         except BaseException as exc:

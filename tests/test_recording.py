@@ -9,6 +9,7 @@ import math
 from pathlib import Path
 import queue
 import socket
+import struct
 import subprocess
 import tempfile
 import threading
@@ -307,6 +308,108 @@ class RecordingIntegrationTests(unittest.TestCase):
         records = [json.loads(line) for line in (self.root / "episodes.jsonl").read_text().splitlines()]
         self.assertEqual([record["episode_id"] for record in records], ["first", "second"])
         self.assertEqual({p.name for p in (self.root / "episodes").iterdir()}, {"first", "second"})
+
+    def test_relayed_jpeg_frames_are_recorded_with_their_own_timestamps(self):
+        import pyarrow.parquet as pq
+        from PIL import Image
+
+        options = recording.RecordingOptions(self.root, "unscrew the cap", {"top": "/dev/video99"}, "relayed")
+        session = recording.RecordingSession(options, self.references, relay=True)
+        self.addCleanup(session.close)
+
+        def send(shade):
+            jpeg = io.BytesIO()
+            Image.fromarray(np.full((120, 160, 3), shade, np.uint8)).save(jpeg, format="JPEG")
+            stamp = time.monotonic()
+            payload = struct.pack("!d", stamp) + jpeg.getvalue()
+            session.feeds["top"].sendall(struct.pack("!I", len(payload)) + payload)
+            return round(stamp * 1e9)
+
+        deadline = time.monotonic() + 8.
+        while not session.ready():          # the recorder becomes ready on its first relayed frame
+            send(0)
+            self.assertLess(time.monotonic(), deadline)
+            time.sleep(.02)
+        session.publish("left", [{"received_at_ns": 1, "position": .2}] * 7)   # ignored before start
+        with redirect_stdout(io.StringIO()):
+            session.start()
+        time.sleep(.2)
+        # No settling time after the last frame: frames in flight at stop must still be saved.
+        sent = [(send(shade * 10), time.sleep(.01))[0] for shade in range(20)]
+        states = [{"received_at_ns": sent[0], "position": .2}] * 7
+        for side in recording.SIDES:
+            session.publish(side, states)
+        with redirect_stdout(io.StringIO()):
+            session.finish(timeout=10)
+        session.close()
+        episode = self.root / "episodes" / "relayed"
+        rgb = pq.read_table(episode / "rgb" / "top.parquet")
+        self.assertEqual(rgb["timestamp_ns"].to_pylist(), [stamp - sent[0] for stamp in sent])
+        self.assertEqual(rgb["frame_index"].to_pylist(), list(range(20)))
+        self.assertEqual(pq.read_table(episode / "state" / "left_eef.parquet").num_rows, 1)
+        self.assertEqual({p.name for p in (episode / "rgb").iterdir()}, {"top.mp4", "top.parquet"})
+
+    def test_debug_streams_are_saved_beside_the_contract_streams_on_the_same_time_origin(self):
+        import pyarrow.parquet as pq
+
+        options = recording.RecordingOptions(self.root, "unscrew the cap", {"top": "synthetic"}, "debugged")
+        session = recording.RecordingSession(options, self.references, camera_factory=CAMERA_FACTORY, debug=True)
+        self.addCleanup(session.close)
+        deadline = time.monotonic() + 8.
+        while not session.ready():
+            self.assertLess(time.monotonic(), deadline)
+            time.sleep(.01)
+        with redirect_stdout(io.StringIO()):
+            session.start()
+        time.sleep(.2)
+        now = time.monotonic()
+        stamp = round(now * 1e9)
+        states = [{"received_at_ns": stamp, "position": .2 + .01 * i, "velocity": .1 * i, "torque": float(i)}
+                  for i in range(7)]
+        command = {"target": np.arange(7.) / 100, "torque": np.arange(7.) / 10}
+        for side in recording.SIDES:
+            session.publish(side, states, command)
+        times = now + (np.arange(3) + 1) / 30
+        pose = [.1, .2, .3, 1., 0., 0., 0., 1., 0., 0., 0., 1.]
+        chunk = {name: (times, np.tile(pose, (3, 1)) if name.endswith("_eef") else np.array([.5, .4, .3]))
+                 for name in recording.STATE_NAMES}
+        session.debug.chunk(chunk, now, now + .08, .075, 2)
+        session.debug.target(now + .1, [*pose, .3, *pose, .7], 0, 2, False)
+        session.debug.write_run({"arguments": {"replan_steps": 16}})
+        with redirect_stdout(io.StringIO()):
+            session.finish(timeout=10)
+        session.close()
+        episode = self.root / "episodes" / "debugged"
+        self.assertEqual({p.name for p in (episode / "debug").iterdir()},
+                         {"left_joints.parquet", "right_joints.parquet", "targets.parquet", "chunks.parquet",
+                          "run.json"})
+        self.assertEqual(json.loads((episode / "debug" / "run.json").read_text())["arguments"]["replan_steps"], 16)
+        # Every debug timestamp shares the origin of the contract streams.
+        eef = pq.read_table(episode / "state" / "left_eef.parquet").to_pylist()[0]
+        joints = pq.read_table(episode / "debug" / "left_joints.parquet").to_pylist()
+        self.assertEqual(len(joints), 1)
+        self.assertEqual(joints[0]["timestamp_ns"], eef["timestamp_ns"])
+        np.testing.assert_allclose(joints[0]["position"], np.arange(7) * .01, atol=1e-12)
+        self.assertEqual(joints[0]["velocity"][3], .1 * 3)
+        self.assertEqual(joints[0]["torque"], list(map(float, range(7))))
+        np.testing.assert_allclose(joints[0]["target"], command["target"])
+        np.testing.assert_allclose(joints[0]["feedforward"], command["torque"])
+        row = pq.read_table(episode / "debug" / "chunks.parquet").to_pylist()[0]
+        origin = stamp - eef["timestamp_ns"]
+        self.assertEqual(row["observed_timestamp_ns"], stamp - origin)
+        self.assertEqual(row["timestamp_ns"], round((now + .08) * 1e9) - origin)
+        self.assertEqual((row["inference_ms"], row["first_row"]), (75., 2))
+        self.assertEqual(row["left_eef"], [pose] * 3)
+        np.testing.assert_allclose(row["right_gripper"], [.5, .4, .3])
+        np.testing.assert_allclose(row["left_eef_offset_ns"], (np.arange(3) + 1) * 1e9 / 30, atol=2)
+        target = pq.read_table(episode / "debug" / "targets.parquet").to_pylist()[0]
+        self.assertEqual(target["timestamp_ns"], round((now + .1) * 1e9) - origin)
+        self.assertEqual((target["left_pose"], target["chunk"], target["row"], target["sent"]), (pose, 0, 2, False))
+        self.assertAlmostEqual(target["right_openness"], .7, places=6)
+        # The contract part of the episode is exactly what a recording without debug streams holds.
+        self.assertEqual({p.name for p in episode.iterdir()}, {"state", "rgb", "debug"})
+        self.assertEqual({p.name for p in (episode / "state").iterdir()},
+                         {f"{name}.parquet" for name in recording.STATE_NAMES})
 
     def test_invalid_feedback_and_recorder_death_never_publish_an_episode(self):
         session = self.open_session("invalid")

@@ -43,12 +43,16 @@ def decode_targets(values):
 
 
 class Robot:
-    """Both physical arms and grippers behind `state()` and `command()`."""
+    """Both physical arms and grippers behind `state()` and `command()`.
+
+    `on_feedback(side, states, command)` receives every servo cycle's raw motor replies and the
+    joint command they answer, e.g. to record them.
+    """
 
     def __init__(self, *, stop, config=ARM_BINDINGS, settings=CONTROL_SETTINGS,
                  gripper_settings=GRIPPER_SETTINGS, gripper_open_deg=GRIPPER_OPEN_DEG,
-                 bus_factory=MotorBus):
-        self.stop, self.bus_factory = stop, bus_factory
+                 bus_factory=MotorBus, on_feedback=None):
+        self.stop, self.bus_factory, self.on_feedback = stop, bus_factory, on_feedback
         self.config, self.gripper_settings = config, gripper_settings
         self.gripper_open = math.radians(gripper_open_deg)
         self.gripper_open_deg = gripper_open_deg
@@ -77,7 +81,8 @@ class Robot:
                 self._interruptible()
                 if not arm.refresh():
                     raise InterruptedError("Control startup interrupted.")
-                self.workers[side] = self.stack.enter_context(ArmWorker(arm, self.stop))
+                self.workers[side] = self.stack.enter_context(
+                    ArmWorker(arm, self.stop, on_feedback=self.on_feedback))
             return self
         except BaseException:
             self.__exit__(*sys.exc_info())
