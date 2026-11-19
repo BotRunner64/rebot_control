@@ -90,6 +90,22 @@ class ActionTimeline:
             raise ValueError("An older observation cannot replace the active action chunk.")
         self.chunk, self.observed_at = chunk, observed_at
 
+    def action_prefix(self, timestamp_ns, steps):
+        """Sample the active targets at the start of each new 30 Hz control interval."""
+        if not steps or self.chunk is None:
+            return None
+        offsets = [k * 1_000_000_000 // CONTROL_HZ for k in range(steps + 1)]
+        starts = (timestamp_ns + np.array(offsets[:-1])) / 1e9
+        deadlines = [timestamp_ns + offset for offset in offsets[1:]]
+        streams = {}
+        for name, (times, values) in self.chunk.items():
+            if deadlines[-1] > round(times[-1] * 1e9):
+                raise TimeoutError("Active chunk does not cover the RTC commitment.")
+            indices = np.searchsorted(times, starts, side="right")
+            column = "pose" if name.endswith("_eef") else "openness"
+            streams[name] = {"timestamp_ns": deadlines, column: values[indices].tolist()}
+        return {"state": streams}
+
     def sample(self, now):
         if self.chunk is None:
             return None
@@ -114,16 +130,22 @@ class InferenceWorker:
         self.lock = threading.Lock()
         self.wake = threading.Event()
         self.done = threading.Event()
+        self.prefix_steps = getattr(client, "metadata", {}).get("rtc_prefix_steps", 0)
+        if type(self.prefix_steps) is not int or self.prefix_steps < 0:
+            raise ValueError("Invalid rtc_prefix_steps in policy metadata.")
+        self.timeline = None
+        self.release_at = 0.
         self.pending = False
         self.requested_at = None
         self.result = self.error = None
         self.thread = threading.Thread(target=self._run, name="policy-inference", daemon=True)
 
-    def request(self):
+    def request(self, timeline=None):
         self.check()
         with self.lock:
             if self.pending:
                 return False
+            self.timeline = timeline
             self.pending = True
             self.requested_at = time.monotonic()
         self.wake.set()
@@ -143,6 +165,8 @@ class InferenceWorker:
     def take(self):
         self.check()
         with self.lock:
+            if self.result is not None and time.monotonic() < self.release_at:
+                return None
             result, self.result = self.result, None
             if result is not None:
                 self.pending = False
@@ -157,9 +181,18 @@ class InferenceWorker:
                 if self.done.is_set() or self.stop.is_set():
                     break
                 observation, observed_at = self.observe()
+                # Only take() can release a pending request. The timeline stays on
+                # the same chunk until the controller accepts this worker's result.
+                release_at = 0.
+                if self.prefix_steps and self.timeline is not None:
+                    prefix = self.timeline.action_prefix(observation["timestamp_ns"], self.prefix_steps)
+                    if prefix is not None:
+                        observation["action_prefix"] = prefix
+                        release_at = prefix["state"]["left_eef"]["timestamp_ns"][-1] / 1e9
                 began = time.monotonic()
                 chunk = parse_actions(self.client.infer(observation))
                 with self.lock:
+                    self.release_at = release_at
                     self.result = chunk, observed_at, time.monotonic() - began
         except Exception as exc:
             if self.done.is_set():
@@ -220,7 +253,7 @@ def control_loop(robot, client, observe, stop, *, duration=None, replan_steps=16
                     log.chunk(chunk, observed_at, now, latency, skipped)
                 chunks += 1
             now = time.monotonic()
-            if now >= next_request and inference.request():
+            if now >= next_request and inference.request(timeline):
                 requests += 1
             selected = timeline.sample(now)
             if selected is not None:

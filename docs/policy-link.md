@@ -24,7 +24,7 @@ WebSocket 二进制帧，内容为普通 MessagePack（不使用 NumPy 扩展，
  "mock":  false}
 ```
 
-`state` 和 `rgb` 是该策略在每条观测中需要的流。`rebot policy` 的 `--camera NAME=DEVICE` 必须恰好提供 `rgb` 列出的相机。`mock` 为真的服务会被 `rebot policy` 拒绝。可以附带其他说明字段，控制端忽略。
+`state` 和 `rgb` 是该策略在每条观测中需要的流。`rebot policy` 的 `--camera NAME=DEVICE` 必须恰好提供 `rgb` 列出的相机。`mock` 为真的服务会被 `rebot policy` 拒绝。可选整数 `rtc_prefix_steps` 指定每次重规划承诺的动作步数，省略或为 0 时使用普通请求。
 
 ## 观测（控制端 → 服务端）
 
@@ -45,6 +45,8 @@ WebSocket 二进制帧，内容为普通 MessagePack（不使用 NumPy 扩展，
 - 每路流的行按时间非递减排列，最后一行最新。格式允许多行以便将来传历史；当前控制端每路只发最新一行，策略端取最后一行。
 - 时间戳是控制端主机单调时钟的纳秒，各流保留自己的采集时刻，不对齐、不插值。顶层 `timestamp_ns` 是本次观测的参考时刻（两臂反馈时刻中较早的一个）。
 - 图像是采集子进程输出的 JPEG 原样转发，目前最长边不超过 640 像素、质量 85，控制端不解码也不缩放。
+
+RTC 重规划请求增加可选字段 `action_prefix`，结构与下方动作回复相同。每路包含恰好 `rtc_prefix_steps` 个绝对目标，时间戳为当前观测后第 1 至第 d 个 30 Hz 控制时刻。首块省略该字段。
 
 ## 动作（服务端 → 控制端）
 

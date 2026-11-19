@@ -211,6 +211,29 @@ class RecordTests(unittest.TestCase):
 
 
 class TimelineTests(unittest.TestCase):
+    def test_committed_prefix_uses_old_targets_on_new_observation_grid(self):
+        timeline = policy.ActionTimeline()
+        stamp = 10_310_000_000
+        self.assertIsNone(timeline.action_prefix(stamp, 3))
+        timeline.accept(hold_chunk(10., x=range(50)), 10., 10.08)
+        prefix = timeline.action_prefix(stamp, 3)["state"]
+        self.assertEqual(set(prefix), set(policy.STREAMS))
+        self.assertEqual([row[0] for row in prefix["left_eef"]["pose"]], [9., 10., 11.])
+        for table in prefix.values():
+            self.assertEqual(table["timestamp_ns"], link.future_timestamps(stamp, 3, 30))
+        with self.assertRaises(TimeoutError):
+            timeline.action_prefix(11_625_000_000, 3)
+
+    def test_fast_reply_waits_for_the_commitment(self):
+        worker = policy.InferenceWorker(SlowClient(), None, threading.Event())
+        worker.result, worker.pending, worker.release_at = object(), True, 10.1
+        with patch.object(policy.time, "monotonic", return_value=10.08):
+            self.assertIsNone(worker.take())
+            self.assertFalse(worker.request())
+        with patch.object(policy.time, "monotonic", return_value=10.1):
+            self.assertIsNotNone(worker.take())
+            self.assertFalse(worker.pending)
+
     def test_latency_skips_expired_rows_without_replaying_them(self):
         timeline = policy.ActionTimeline()
         timeline.accept(hold_chunk(10., x=range(50)), 10., 10.08)
