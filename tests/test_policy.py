@@ -43,6 +43,7 @@ def hold_chunk(observed_at, x=None, horizon=50):
     return policy.parse_actions(reply)
 
 class SlowClient:
+    metadata = {"rtc_prefix_steps": 3}
     timeout = .5
 
     def __init__(self, latency=.12, fail=False):
@@ -68,7 +69,7 @@ class SlowClient:
 @contextmanager
 def endpoint(infer, metadata=None):
     servers = []
-    thread = threading.Thread(target=link.serve, args=(infer, metadata or link.metadata(), "127.0.0.1", 0),
+    thread = threading.Thread(target=link.serve, args=(infer, metadata or link.metadata(rtc_prefix_steps=3), "127.0.0.1", 0),
                               kwargs={"ready": servers.append})
     thread.start()
     try:
@@ -150,7 +151,7 @@ class RecordTests(unittest.TestCase):
                 events.append(f"{name} closed")
 
         client = SlowClient()
-        client.metadata = link.metadata()
+        client.metadata = link.metadata(rtc_prefix_steps=3)
         binding = type("Binding", (), {"reference": [.2] * 7})
         with patch.object(policy, "connect_policy", return_value=client), \
                 patch.object(cameras, "PolicyCameras", side_effect=lambda *a, **k: device("cameras")) as capture, \
@@ -296,6 +297,12 @@ class TimelineTests(unittest.TestCase):
 
 
 class NetworkTests(unittest.TestCase):
+    def test_live_policy_requires_a_positive_rtc_commitment(self):
+        for meta in (link.metadata(), link.metadata(rtc_prefix_steps=0)):
+            with self.subTest(meta=meta), endpoint(lambda obs: {}, meta) as port:
+                with self.assertRaisesRegex(ValueError, "positive rtc_prefix_steps"):
+                    policy.connect_policy("127.0.0.1", port, 0.5)
+
     def test_recording_shaped_roundtrip_and_metadata(self):
         obs = observation()
         received = []

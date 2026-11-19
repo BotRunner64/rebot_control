@@ -21,10 +21,10 @@ WebSocket 二进制帧，内容为普通 MessagePack（不使用 NumPy 扩展，
 {"protocol": "rebot-policy-link/1",
  "state": ["left_eef", "right_eef", "left_gripper", "right_gripper"],
  "rgb":   ["top", "left_wrist", "right_wrist"],
- "mock":  false}
+ "mock":  false, "rtc_prefix_steps": 3}
 ```
 
-`state` 和 `rgb` 是该策略在每条观测中需要的流。`rebot policy` 的 `--camera NAME=DEVICE` 必须恰好提供 `rgb` 列出的相机。`mock` 为真的服务会被 `rebot policy` 拒绝。可选整数 `rtc_prefix_steps` 指定每次重规划承诺的动作步数，省略或为 0 时使用普通请求。
+`state` 和 `rgb` 是该策略在每条观测中需要的流。`rebot policy` 的 `--camera NAME=DEVICE` 必须恰好提供 `rgb` 列出的相机。`mock` 为真的服务会被 `rebot policy` 拒绝。实机策略必须声明正整数 `rtc_prefix_steps`，指定每次重规划承诺的动作步数。
 
 ## 观测（控制端 → 服务端）
 

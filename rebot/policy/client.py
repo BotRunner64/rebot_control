@@ -26,6 +26,9 @@ def connect_policy(host, port, timeout):
         unknown = set(client.metadata["state"]) - set(STREAMS)
         if unknown:
             raise ValueError(f"Policy requires state streams this robot does not provide: {sorted(unknown)}.")
+        steps = client.metadata.get("rtc_prefix_steps")
+        if not client.metadata["mock"] and (type(steps) is not int or steps < 1):
+            raise ValueError("Policy metadata must declare a positive rtc_prefix_steps.")
         return client
     except BaseException:
         client.close()
@@ -92,7 +95,7 @@ class ActionTimeline:
 
     def action_prefix(self, timestamp_ns, steps):
         """Sample the active targets at the start of each new 30 Hz control interval."""
-        if not steps or self.chunk is None:
+        if self.chunk is None:
             return None
         offsets = [k * 1_000_000_000 // CONTROL_HZ for k in range(steps + 1)]
         starts = (timestamp_ns + np.array(offsets[:-1])) / 1e9
@@ -130,9 +133,7 @@ class InferenceWorker:
         self.lock = threading.Lock()
         self.wake = threading.Event()
         self.done = threading.Event()
-        self.prefix_steps = getattr(client, "metadata", {}).get("rtc_prefix_steps", 0)
-        if type(self.prefix_steps) is not int or self.prefix_steps < 0:
-            raise ValueError("Invalid rtc_prefix_steps in policy metadata.")
+        self.prefix_steps = client.metadata["rtc_prefix_steps"]
         self.timeline = None
         self.release_at = 0.
         self.pending = False
@@ -184,7 +185,7 @@ class InferenceWorker:
                 # Only take() can release a pending request. The timeline stays on
                 # the same chunk until the controller accepts this worker's result.
                 release_at = 0.
-                if self.prefix_steps and self.timeline is not None:
+                if self.timeline is not None:
                     prefix = self.timeline.action_prefix(observation["timestamp_ns"], self.prefix_steps)
                     if prefix is not None:
                         observation["action_prefix"] = prefix
