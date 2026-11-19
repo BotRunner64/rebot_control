@@ -1,6 +1,6 @@
 # 数据格式
 
-`rebot collect` 和 `rebot policy --record` 保存可回放的连续录制。`rebot process` 把选中的片段写成 LOOM-data 的标准 LeRobot v3.0 数据集。操作步骤见[数据流程](data.md)，完整字段定义见 [LOOM-data 导出契约](https://github.com/BotRunner64/LOOM-data/blob/36dd849dd1eb9ce87dfb59ad656c00147270ff66/docs/contract/export-contract.md)。
+`rebot collect` 和 `rebot policy --record` 保存可回放的连续录制。`rebot process` 把选中的片段写成 LOOM-data 的标准 LeRobot v3.0 数据集。操作步骤见[数据流程](data.md)，完整字段定义见 [LOOM-data 导出契约](https://github.com/BotRunner64/LOOM-data/blob/feba93d4df58c3fbbd2ba51a55617c3459c07ade/docs/contract/export-contract.md)。
 
 ## 连续录制
 
@@ -17,7 +17,7 @@
 
 从臂每收齐一批反馈生成一个 EEF 样本和一个夹爪样本。EEF 取前六轴最晚的接收时刻，夹爪取第七轴的接收时刻。遥操作伺服标称 200 Hz，策略控制标称 250 Hz。相机按设备实际帧率采集，GStreamer PTS 和反馈接收时刻换算到同一主机单调时钟。硬件之间没有触发同步。
 
-录制结束时取所有流的共同时间区间，从最晚的首样本起以 30 Hz 取帧。位置与开度线性插值，旋转用 SLERP，每路 RGB 取最近的原始帧。跨越超过 100 ms 的 state 间隙、最近 RGB 距帧时刻超过 50 ms，或共同区间不足两帧都会使本次同步失败。失败的采样留在 `.pending/<id>/`。成功录制通过目录改名一次发布。
+录制结束时取所有流的共同时间区间，从最晚的首样本起以 30 Hz 取帧。位置与开度线性插值，旋转用 SLERP，每路 RGB 取最近的原始帧。跨越超过 500 ms 的 state 间隙、最近 RGB 距帧时刻超过 250 ms，或共同区间不足两帧都会使本次同步失败。失败的采样留在 `.pending/<id>/`。成功录制通过目录改名一次发布。
 
 第 k 帧对应 k/30 秒，每路视频为 H.264、yuv420p、恒定 30 fps、无音轨。按解码图像等比缩放到宽 640，高度按 4:3、16:9、16:10、16:13 分别取 480、360、400、520。其他宽高比会报错。
 

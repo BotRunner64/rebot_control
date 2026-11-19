@@ -72,14 +72,14 @@ class SynchronizationTests(unittest.TestCase):
             self.assertEqual((frames[0].width, frames[0].height), (640, 480))
 
     def test_rejects_a_state_gap_without_publishing(self):
-        self.write_states([0, 101])
-        with self.assertRaisesRegex(ValueError, "100 ms"):
+        self.write_states([0, 501])
+        with self.assertRaisesRegex(ValueError, "500 ms"):
             self.run_sync()
         self.assertFalse((self.root / "synced/recording.json").exists())
 
     def test_rejects_a_camera_gap_without_publishing(self):
-        self.write_states([0, 80, 160])
-        self.camera_times([0, 140, 160])
-        with self.assertRaisesRegex(ValueError, "50 ms"):
+        self.write_states([0, 300, 600])
+        self.camera_times([0, 570, 600])
+        with self.assertRaisesRegex(ValueError, "250 ms"):
             self.run_sync()
         self.assertFalse((self.root / "synced/recording.json").exists())

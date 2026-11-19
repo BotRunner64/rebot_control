@@ -22,7 +22,7 @@ dependencies = [
 [project.optional-dependencies]
 ee = ["mink>=1.4.0,<2", "quadprog>=0.1.13"]
 policy = ["msgpack>=1.0"]
-data = ["loom-data @ git+https://github.com/BotRunner64/LOOM-data.git@36dd849dd1eb9ce87dfb59ad656c00147270ff66"]
+data = ["loom-data @ git+https://github.com/BotRunner64/LOOM-data.git@feba93d4df58c3fbbd2ba51a55617c3459c07ade"]
 
 [project.scripts]
 rebot = "rebot.cli:main"
