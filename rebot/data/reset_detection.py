@@ -1,6 +1,6 @@
 """Propose task ranges between repeated, stationary returns to a reference EEF pose.
 
-The analysis grid is only for segmentation. Export always uses native samples.
+The analysis grid is only for segmentation. Export selects the original synchronized frames.
 """
 
 import math
@@ -10,7 +10,6 @@ import numpy as np
 
 DEFAULTS = {"home_radius_cm": 10.0, "still_seconds": 0.8, "reset_lead_seconds": 1.0}
 STEP_NS = 50_000_000
-MAX_AGE_NS = 250_000_000
 SPEED_WINDOW_NS = 250_000_000
 
 

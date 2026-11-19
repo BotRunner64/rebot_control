@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """Policy-agnostic link between a robot controller and a policy server.
 
-Messages reuse the recording contract. Every stream is a small table with the
-columns of its recorded Parquet file. An observation carries the most recent
+Each live stream is a small timestamped table. An observation carries the most recent
 rows of each stream; an action reply carries predicted future rows of the state
 streams, stamped in the controller's clock. Nothing here knows about a model.
 
@@ -22,7 +21,7 @@ import traceback
 import msgpack
 
 PROTOCOL = "rebot-policy-link/1"
-# Stream kind is the name suffix, as in state/<side>_eef.parquet and state/<side>_gripper.parquet.
+# The stream name suffix selects its value column.
 STATE_COLUMNS = {"eef": "pose", "gripper": "openness"}
 REBOT_STATE = ("left_eef", "right_eef", "left_gripper", "right_gripper")
 REBOT_RGB = ("top", "left_wrist", "right_wrist")

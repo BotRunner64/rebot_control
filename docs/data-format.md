@@ -1,26 +1,31 @@
 # 数据格式
 
-`rebot collect` 和 `rebot process` 的输出格式相同，遵循 LOOM 导出契约。这里是数据的精确定义；怎么用见 [数据流程](data.md)。
+`rebot collect` 和 `rebot policy --record` 保存可回放的连续录制。`rebot process` 把选中的片段写成 LOOM-data 的标准 LeRobot v3.0 数据集。操作步骤见[数据流程](data.md)，完整字段定义见 [LOOM-data 导出契约](https://github.com/BotRunner64/LOOM-data/blob/36dd849dd1eb9ce87dfb59ad656c00147270ff66/docs/contract/export-contract.md)。
 
-## 目录结构
+## 连续录制
 
-```text
-datasets/cup/
-├── episodes.jsonl                      每行一个 episode：id 与任务描述
-└── episodes/<episode_id>/
-    ├── state/
-    │   ├── left_eef.parquet            timestamp_ns: int64, pose: 12 × float64
-    │   ├── right_eef.parquet
-    │   ├── left_gripper.parquet        timestamp_ns: int64, openness: float32
-    │   └── right_gripper.parquet
-    └── rgb/
-        ├── <camera>.mp4                H.264，无音轨
-        └── <camera>.parquet            frame_index: int64, timestamp_ns: int64
-```
+每次成功的采集生成一个 `recordings/<id>/` 目录，包含以下文件。
 
-- 没有 action、关节角、速度等其他字段。
-- `frame_index` 从 0 开始，对应视频按显示顺序解码的第几帧。**帧的时间以 Parquet 为准**，不要用视频容器的时间或标称帧率。
-- `rebot process` 的输出在根目录多一个 `processing.json`，记录来源和切分信息。
+| 文件 | 内容 |
+| --- | --- |
+| `recording.json` | 同步帧数、采集时使用的相机名、任务描述 |
+| `frames.parquet` | 每帧一行，含 `observation.state` 和 `task` |
+| `<camera>.mp4` | 对应相机的同步视频 |
+| `debug/` | 仅策略录制时保存的原频率诊断数据 |
+
+## 时间与图像
+
+从臂每收齐一批反馈生成一个 EEF 样本和一个夹爪样本。EEF 取前六轴最晚的接收时刻，夹爪取第七轴的接收时刻。遥操作伺服标称 200 Hz，策略控制标称 250 Hz。相机按设备实际帧率采集，GStreamer PTS 和反馈接收时刻换算到同一主机单调时钟。硬件之间没有触发同步。
+
+录制结束时取所有流的共同时间区间，从最晚的首样本起以 30 Hz 取帧。位置与开度线性插值，旋转用 SLERP，每路 RGB 取最近的原始帧。跨越超过 100 ms 的 state 间隙、最近 RGB 距帧时刻超过 50 ms，或共同区间不足两帧都会使本次同步失败。失败的采样留在 `.pending/<id>/`。成功录制通过目录改名一次发布。
+
+第 k 帧对应 k/30 秒，每路视频为 H.264、yuv420p、恒定 30 fps、无音轨。按解码图像等比缩放到宽 640，高度按 4:3、16:9、16:10、16:13 分别取 480、360、400、520。其他宽高比会报错。
+
+## LeRobot v3.0
+
+每个布局使用 `top`、`left_wrist`、`right_wrist` 的非空子集，每集每路一个视频。帧表位于 `data/`，其中 `timestamp = frame_index / 30`。每个 episode 的末帧也保留。指令由 `task_index` 关联 `meta/tasks.parquet`，片段 ID 存入 `meta/episodes/` 的 `episode_id` 列。
+
+`observation.state` 是 26 维 float32，依次为左 EEF（12）、左夹爪（1）、右 EEF（12）、右夹爪（1）。数据集只提供实测状态，动作由下游构造。
 
 ## 末端位姿 `pose`
 
@@ -57,27 +62,3 @@ openness = clip((电机 7 实测角 − 闭合零位) / radians(record_gripper_o
 ```
 
 0 = 闭合，1 = 张开。取实测位置：夹住物体合不拢时，记录的就是合不拢的开度。线性比例，没有换算成指尖间距。
-
-## 数据来源与时间戳
-
-**state 来自从臂的实测反馈**，不是主手角度或控制目标。每收齐一批 7 个电机的反馈产生一个 EEF 样本（6 轴正运动学）和一个夹爪样本。实际频率取决于 CAN，标称 200 Hz 不是保证。
-
-**时间戳都是同一台主机的单调时钟**（纳秒）：
-
-- state：主机**收到**反馈的时刻（EEF 取前 6 轴里最晚的一个）。CAN 反馈没有硬件时间戳，所以这不是电机内部的采样时刻。
-- 相机：GStreamer buffer 的 PTS 换算到主机单调时钟，不是首帧到达或编码完成的时刻。相机不提供时间戳会报错，不会按帧率编造。
-
-**各路数据保持各自的原始采样**：不对齐、不补帧、不重采样，行数也各不相同。发布时所有流减去同一个时间原点（所有流首样本中最早的那个），所以流与流之间的时间差保留。对齐到统一时间轴是 `rebot export` 的工作。
-
-左右臂、各相机之间都没有硬件同步。
-
-## 视频
-
-采集时等比例缩小到最长边 ≤ 960 px（不裁剪、不放大），宽高取偶数。x264 CRF 23，码率上限 50 Mbps，保持相机原生帧率。启动准备阶段的帧不写入。
-
-## 发布保证
-
-- 一段录制只有全部校验通过才会出现在 `episodes.jsonl`：所有流非空、时间戳不递减、每路视频能完整解码且帧数与索引一致。
-- 失败的录制留在 `.pending/<episode_id>/`。
-- 录制期间对数据集加文件锁，拒绝并发写入和重复的 episode id。
-- 断电或 `kill -9` 恰好发生在“目录改名”和“更新 `episodes.jsonl`”之间时，会留下一个未登记的目录；下次采集会明确报错并拒绝写入，需要人工检查，不会静默覆盖。

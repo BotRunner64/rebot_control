@@ -1,4 +1,4 @@
-"""Asynchronous feedback recording and transactional episode export."""
+"""Record measured feedback and finalize a synchronized 30 fps recording."""
 
 from contextlib import ExitStack
 from dataclasses import dataclass
@@ -12,7 +12,7 @@ import queue
 import re
 import signal
 import socket
-import struct
+import shutil
 import subprocess
 import sys
 import time
@@ -54,8 +54,8 @@ class RecordingOptions:
         if not isinstance(self.instruction, str) or not self.instruction.strip():
             raise ValueError("Recording requires a nonempty task instruction.")
         self.instruction.encode("utf-8")
-        if not self.cameras:
-            raise ValueError("Recording requires at least one named RGB camera.")
+        if not 1 <= len(self.cameras) <= 3:
+            raise ValueError("Recording requires one to three RGB cameras.")
         devices = set()
         for name, device in self.cameras.items():
             identifier(name, "camera ID", CAMERA_ID)
@@ -125,7 +125,6 @@ def schemas():
     return {
         "eef": pa.schema([timestamp, pa.field("pose", pa.list_(pa.float64(), 12), nullable=False)]),
         "gripper": pa.schema([timestamp, pa.field("openness", pa.float32(), nullable=False)]),
-        "rgb": pa.schema([pa.field("frame_index", pa.int64(), nullable=False), timestamp]),
     }
 
 
@@ -283,7 +282,7 @@ class CameraProcess:
 
 
 class RecordingSession:
-    """Stage an episode outside episodes/ and publish only after successful finalization.
+    """Stage a recording outside recordings/ and publish only after successful finalization.
 
     `references` maps each side to its seven calibrated zero positions in radians.
     With `relay`, no camera device is opened: the caller already captures the cameras and
@@ -294,7 +293,7 @@ class RecordingSession:
 
     def __init__(self, options, references, *, camera_factory=CameraProcess, relay=False, debug=False):
         options.validate()
-        schemas()  # Fail before connecting to or enabling hardware.
+        from rebot.data import synchronous  # Check recording dependencies before hardware startup.
         self.options, self.cameras, self.feeds = options, [], {}
         self.viewer = self.debug = None
         self.process = self.status = self.samples = self.lock = None
@@ -310,9 +309,10 @@ class RecordingSession:
                 fcntl.flock(self.lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError as exc:
                 raise RuntimeError("Another recording session is using this dataset.") from exc
-            self.records = self._read_metadata()
-            if any(record["episode_id"] == self.episode_id for record in self.records):
-                raise ValueError(f"Episode already exists: {self.episode_id}.")
+            if (self.root / "episodes.jsonl").exists():
+                raise ValueError("Legacy recording directory. Choose a new recording directory.")
+            if (self.root / "recordings" / self.episode_id).exists():
+                raise ValueError(f"Recording already exists: {self.episode_id}.")
             self.directory.mkdir(parents=True)
             (self.directory / "state").mkdir()
             (self.directory / "rgb").mkdir()
@@ -349,17 +349,6 @@ class RecordingSession:
         except BaseException:
             self.close()
             raise
-
-    def _read_metadata(self):
-        path = self.root / "episodes.jsonl"
-        records = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()] if path.exists() else []
-        ids = [record["episode_id"] for record in records]
-        for episode_id in ids:
-            identifier(episode_id, "existing episode ID")
-        directories = {p.name for p in (self.root / "episodes").iterdir()} if (self.root / "episodes").exists() else set()
-        if len(ids) != len(set(ids)) or set(ids) != directories:
-            raise ValueError("Existing episodes.jsonl and episode directories are inconsistent.")
-        return records
 
     def check(self, *, finishing=False):
         while self.status.poll():
@@ -425,25 +414,17 @@ class RecordingSession:
             time.sleep(.01)
         self.process.join(2.)
         extra = [] if self.debug is None else self.debug.finish(deadline)
-        metadata = finalize_episode(self.directory, self.episode_id, list(self.options.cameras),
-                                    self.options.instruction, extra=extra)
-        destination = self.root / "episodes" / self.episode_id
+        from rebot.data.synchronous import synchronize
+
+        synced = self.directory / "synced"
+        metadata, origin = synchronize(self.directory, synced, self.options.cameras, self.options.instruction)
+        if self.debug is not None:
+            normalize_debug(extra, origin)
+            (self.directory / "debug").rename(synced / "debug")
+        destination = self.root / "recordings" / self.episode_id
         destination.parent.mkdir(exist_ok=True)
-        metadata_path = self.root / ".pending" / f"{self.episode_id}.jsonl.tmp"
-        try:
-            with metadata_path.open("x", encoding="utf-8") as stream:
-                for record in [*self.records, metadata]:
-                    stream.write(json.dumps(record, ensure_ascii=False, allow_nan=False) + "\n")
-                stream.flush()
-                os.fsync(stream.fileno())
-            self.directory.rename(destination)
-            try:
-                os.replace(metadata_path, self.root / "episodes.jsonl")
-            except BaseException:
-                destination.rename(self.directory)
-                raise
-        finally:
-            metadata_path.unlink(missing_ok=True)
+        synced.rename(destination)
+        shutil.rmtree(self.directory)
         print(f"Saved episode {self.episode_id}: {destination}", flush=True)
         return metadata
 
@@ -475,58 +456,13 @@ class RecordingSession:
             self.lock.close()
 
 
-def finalize_episode(directory, episode_id, cameras, instruction, extra=()):
-    """Normalize all streams together, using bounded batches and integer subtraction.
-
-    `extra` tables are not validated and do not influence the time origin; every column of
-    theirs named `*timestamp_ns` is shifted to the episode's origin like the contract streams.
-    """
+def normalize_debug(paths, origin):
+    """Put native-rate diagnostics on the clock of the first synchronized frame."""
     import pyarrow as pa
     import pyarrow.compute as pc
     import pyarrow.parquet as pq
 
-    directory = Path(directory)
-    schema = schemas()
-    paths = [directory / "state" / f"{name}.parquet" for name in STATE_NAMES]
-    first, last = [], []
-    for camera in cameras:
-        raw_path = directory / "rgb" / f"{camera}.timestamps"
-        video = directory / "rgb" / f"{camera}.mp4"
-        if not video.is_file() or video.stat().st_size == 0:
-            raise ValueError(f"Missing RGB video for {camera}.")
-        if raw_path.stat().st_size == 0 or raw_path.stat().st_size % 8:
-            raise ValueError(f"Invalid RGB timestamps for {camera}.")
-        path = directory / "rgb" / f"{camera}.parquet"
-        with pq.ParquetWriter(path, schema["rgb"], compression="zstd") as writer, raw_path.open("rb") as stream:
-            index = 0
-            while block := stream.read(8 * BATCH_SIZE):
-                timestamps = [item[0] for item in struct.iter_unpack("<q", block)]
-                writer.write_table(pa.Table.from_arrays(
-                    [pa.array(range(index, index + len(timestamps)), type=pa.int64()),
-                     pa.array(timestamps, type=pa.int64())], schema=schema["rgb"]))
-                index += len(timestamps)
-        paths.append(path)
     for path in paths:
-        previous = None
-        count = 0
-        for batch in pq.ParquetFile(path).iter_batches(batch_size=BATCH_SIZE):
-            values = batch.column("timestamp_ns").to_numpy()
-            if len(values) == 0:
-                continue
-            if (np.any(values < 0) or np.any(values[1:] < values[:-1])
-                    or previous is not None and values[0] < previous):
-                raise ValueError(f"Invalid or unordered timestamps in {path.name}.")
-            if count == 0:
-                first.append(int(values[0]))
-            previous = int(values[-1])
-            count += len(values)
-        if count == 0:
-            raise ValueError(f"Required stream is empty: {path.name}.")
-        last.append(previous)
-    origin, end = min(first), max(last) - min(first)
-    if end <= 0:
-        raise ValueError("An episode must have a positive sampled duration.")
-    for path in [*paths, *map(Path, extra)]:
         source = pq.ParquetFile(path)
         temporary = path.with_suffix(".normalized")
         with pq.ParquetWriter(temporary, source.schema_arrow, compression="zstd") as writer:
@@ -537,11 +473,6 @@ def finalize_episode(directory, episode_id, cameras, instruction, extra=()):
                         columns[index] = pc.subtract(columns[index], pa.scalar(origin, type=pa.int64()))
                 writer.write_batch(pa.RecordBatch.from_arrays(columns, schema=batch.schema))
         os.replace(temporary, path)
-    for camera in cameras:
-        (directory / "rgb" / f"{camera}.timestamps").unlink()
-        (directory / "rgb" / f"{camera}.log").unlink(missing_ok=True)
-    return {"episode_id": episode_id, "cameras": cameras,
-            "instructions": [{"start_ns": 0, "end_ns": end, "text": instruction}]}
 
 
 def parse_cameras(values):

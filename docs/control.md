@@ -157,10 +157,10 @@ rebot policy --port 8000 --instruction "Unscrew the bottle cap" \
   --record datasets/cap_debug
 ```
 
-输出与 `rebot collect` [格式相同](data-format.md)，每次运行往数据集追加一个 episode，可以直接用 `rebot process` 回放、`rebot export` 导出。
+输出与 `rebot collect` [格式相同](data-format.md)，每次运行往数据集追加一个 episode，可以直接用 `rebot process` 回放、切分并导出。
 
-- **录的是策略看到的东西**：视频就是发给策略的那几路图像（最长边 640 px，逐帧时间戳与观测里的一致），状态是实测的末端位姿和夹爪开合度（按 `--gripper-open-deg` 归一化）。
-- **另外带一份调试数据**，在 episode 的 `debug/` 目录下，见下表。它不属于[数据格式](data-format.md)，`rebot process` 和 `rebot export` 不读它；`rebot collect` 的采集数据里没有它。
+- **录的是策略看到的东西**：视频由策略相机的同一批图像按采集时刻对齐到 30 fps，状态是实测的末端位姿和夹爪开合度（按 `--gripper-open-deg` 归一化）。
+- **另外带一份调试数据**，在 episode 的 `debug/` 目录下，见下表。它不属于[数据格式](data-format.md)，切分导出时跳过该目录；`rebot collect` 的采集数据里没有它。
 - 录制不改变策略的输入；录制进程就绪后才使能电机。
 - 结束后要封装和校验视频，**看到 `Saved episode ...` 才算保存成功**。此时双臂已处于保持状态。
 - 控制中途出错停止（推理超时、动作用尽等）时，这段录制**照样保存**，再报告原始错误。
@@ -176,7 +176,7 @@ rebot policy --port 8000 --instruction "Unscrew the bottle cap" \
 | `chunks.parquet` | 每次推理 | 完整的动作块：四路流各自的目标和相对观测时刻的时间偏移，观测时刻、推理耗时、收到时已过期的行数 `first_row` |
 | `run.json` | 每次运行 | 命令行参数、策略服务的元数据、`control.yaml` 和 `gripper.yaml` 的内容、关节增益、时序统计、停止原因或错误 |
 
-- 所有 `*timestamp_ns` 与 `state/`、`rgb/` 同一个时间原点，可以直接按时间对齐。
+- 所有 `*timestamp_ns` 以同步帧 0 为原点，帧 0 之前的诊断样本时间为负数。
 - 关节角是相对软件零位的弧度，夹爪（第 7 个）是电机角；位姿和开合度的定义与[数据格式](data-format.md)相同。
 - `torque` 是电机上报的力矩。`feedforward` 对前 6 轴是重力前馈，电机在此之上再加自己的 PD 项；对夹爪是上位机算出的全部力矩（已限幅）。
 - `targets` 减去同一时刻的 `state` 就是末端跟踪误差。`sent` 为假表示目标会自碰撞而被拒绝，机械臂保持上一个目标。

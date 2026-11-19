@@ -22,19 +22,7 @@ dependencies = [
 [project.optional-dependencies]
 ee = ["mink>=1.4.0,<2", "quadprog>=0.1.13"]
 policy = ["msgpack>=1.0"]
-# Dataset export only. Install LeRobot itself afterwards with --no-deps; see docs/data.md.
-lerobot = [
-    "torch==2.7.1",
-    "torchvision==0.22.1",
-    "datasets>=4,<5",
-    "av>=15,<16",
-    "huggingface-hub>=0.34.2,<0.36",
-    "accelerate>=1.10,<2",
-    "einops>=0.8,<0.9",
-    "draccus==0.10.0",
-    "imageio[ffmpeg]>=2.34,<3",
-    "tqdm>=4.66",
-]
+data = ["loom-data @ git+https://github.com/BotRunner64/LOOM-data.git@36dd849dd1eb9ce87dfb59ad656c00147270ff66"]
 
 [project.scripts]
 rebot = "rebot.cli:main"

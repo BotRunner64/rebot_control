@@ -97,23 +97,22 @@ class RecordingIntegrationTests(unittest.TestCase):
             if time.monotonic() >= deadline:
                 self.fail("Synthetic recording startup timed out")
             time.sleep(.01)
+        self.started_at = time.monotonic_ns()
         return session
 
     def finish_sample(self, session):
-        for side in recording.SIDES:
-            now = time.monotonic_ns()
-            session.samples.put((side, now, [.2] * 7, now))
+        import pyarrow.parquet as pq
+        # Supply both arms across the test camera's recorded interval.
+        session.stop_cameras()
+        stop = time.monotonic_ns()
+        start = self.started_at
+        for stamp in range(start, stop + 20_000_000, 20_000_000):
+            for side in recording.SIDES:
+                session.samples.put((side, stamp, [.2] * 7, stamp))
         with redirect_stdout(io.StringIO()):
             session.finish(timeout=10)
         session.close()
-        import pyarrow.parquet as pq
-        path = self.root / "episodes" / session.episode_id
-        table = pq.read_table(path / "rgb" / "top.parquet")
-        self.assertEqual(table["frame_index"].to_pylist(), list(range(table.num_rows)))
-        times = table["timestamp_ns"].to_numpy()
-        self.assertTrue(np.all(np.diff(times) > 0))
-        self.assertAlmostEqual(float(np.median(np.diff(times))), 50_000_000, delta=1_000_000)
-        return table
+        return pq.read_table(self.root / "recordings" / session.episode_id / "frames.parquet")
 
     def test_live_viewer_uses_recorded_frames_and_closing_it_keeps_recording(self):
         viewer_factory = partial(recording.RecordingViewer, open_browser=False, port=0)
@@ -156,11 +155,10 @@ class RecordingIntegrationTests(unittest.TestCase):
         self.assertIsNone(session.cameras[0].process.poll())
         table = self.finish_sample(session)
         self.assertGreater(table.num_rows, 10)
-        # Verify finalized timestamps: the live index is buffered until shutdown.
-        self.assertGreater(table["timestamp_ns"][-1].as_py(), (closed_at + .3) * 1e9)
+        self.assertGreater(table.num_rows / 30, closed_at + .3)
 
     def test_three_camera_previews_share_capture_and_all_streams_are_saved(self):
-        import pyarrow.parquet as pq
+        import av
         cameras = {"top": "synthetic0", "left_wrist": "synthetic1", "right_wrist": "synthetic2"}
         viewer_factory = partial(recording.RecordingViewer, open_browser=False, port=0)
         with patch.object(recording, "RecordingViewer", side_effect=viewer_factory):
@@ -188,11 +186,12 @@ class RecordingIntegrationTests(unittest.TestCase):
                 size = int(response.readline().split(b":")[1])
                 response.readline()
                 self.assertTrue(response.read(size).startswith(b"\xff\xd8"))
-        self.finish_sample(session)
+        table = self.finish_sample(session)
         for camera in cameras:
-            directory = self.root / "episodes" / session.episode_id / "rgb"
+            directory = self.root / "recordings" / session.episode_id
             self.assertTrue((directory / (camera + ".mp4")).is_file())
-            self.assertGreater(pq.read_table(directory / (camera + ".parquet")).num_rows, 0)
+            with av.open(str(directory / (camera + ".mp4"))) as reader:
+                self.assertEqual(reader.streams.video[0].frames, table.num_rows)
 
     def test_batched_start_and_stop_commands_cannot_stall_camera_exit(self):
         camera = CAMERA_FACTORY("synthetic", self.root, "quick")
@@ -250,64 +249,23 @@ class RecordingIntegrationTests(unittest.TestCase):
         session.start(); time.sleep(.2)
         self.assertGreater(self.finish_sample(session).num_rows, 0)
 
-    def test_native_samples_shared_origin_schema_video_and_metadata_append(self):
+    def test_synchronized_recordings_append_independently(self):
         import pyarrow as pa
-        import pyarrow.parquet as pq
-
-        session = self.open_session("first")
-        session.start()
-        origin = time.monotonic_ns()
-        # Cross row-group boundaries, preserve unequal rates and nonuniform intervals.
-        left_times = [i * i * 100 for i in range(600)]
-        for index, offset in enumerate(left_times):
-            raw = [.2] * 6 + [.2 + math.radians(90)]
-            session.samples.put(("left", origin + offset, raw, origin + offset + 300))
-            if index < 100:
-                session.samples.put(("right", origin + 1000 + index * 2000,
-                                     [.2] * 6 + [20.], origin + 1100 + index * 2000))
-        time.sleep(.25)
-        with redirect_stdout(io.StringIO()):
-            metadata = session.finish()
-        session.close()
-        episode = self.root / "episodes" / "first"
-        left = pq.read_table(episode / "state" / "left_eef.parquet")
-        self.assertEqual(left.column_names, ["timestamp_ns", "pose"])
-        self.assertEqual(left.schema.field("timestamp_ns").type, pa.int64())
-        self.assertEqual(left.schema.field("pose").type, pa.list_(pa.float64(), 12))
-        self.assertFalse(left.schema.field("pose").nullable)
-        self.assertEqual(left["timestamp_ns"].to_pylist(), left_times)
-        self.assertEqual(left.num_rows, 600)
-        expected_pose = recording.ForwardKinematics().pose(np.zeros(6))
-        np.testing.assert_allclose(left["pose"][0].as_py(), expected_pose, atol=1e-12)
-        right = pq.read_table(episode / "state" / "right_eef.parquet")
-        self.assertEqual(right.num_rows, 100)
-        self.assertEqual(right["timestamp_ns"][0].as_py(), 1000)
-        left_gripper = pq.read_table(episode / "state" / "left_gripper.parquet")
-        self.assertEqual(left_gripper.schema.field("openness").type, pa.float32())
-        self.assertEqual(left_gripper["timestamp_ns"][0].as_py(), 300)
-        self.assertAlmostEqual(left_gripper["openness"][0].as_py(), 1 / 3, places=6)
-        right_gripper = pq.read_table(episode / "state" / "right_gripper.parquet")
-        self.assertEqual(right_gripper["openness"].to_pylist(), [1.] * 100)
-        rgb = pq.read_table(episode / "rgb" / "top.parquet")
-        self.assertGreater(rgb.num_rows, 0)
-        self.assertEqual(rgb["frame_index"].to_pylist(), list(range(rgb.num_rows)))
-        self.assertGreater(rgb["timestamp_ns"][0].as_py(), 0)
-        tables = (left, right, left_gripper, right_gripper, rgb)
-        end = max(table["timestamp_ns"][-1].as_py() for table in tables)
-        self.assertEqual(metadata["instructions"], [{"start_ns": 0, "end_ns": end, "text": "pick up the cup"}])
-        self.assertEqual({p.name for p in (episode / "rgb").iterdir()}, {"top.mp4", "top.parquet"})
-        self.assertEqual({p.name for p in episode.iterdir()}, {"state", "rgb"})
-        second = self.open_session("second")
-        second.start()
-        for side in recording.SIDES:
-            second.samples.put((side, time.monotonic_ns(), [.2] * 7, time.monotonic_ns()))
-        time.sleep(.15)
-        with redirect_stdout(io.StringIO()):
-            second.finish()
-        second.close()
-        records = [json.loads(line) for line in (self.root / "episodes.jsonl").read_text().splitlines()]
-        self.assertEqual([record["episode_id"] for record in records], ["first", "second"])
-        self.assertEqual({p.name for p in (self.root / "episodes").iterdir()}, {"first", "second"})
+        for name in ("first", "second"):
+            session = self.open_session(name)
+            session.start()
+            time.sleep(.3)
+            table = self.finish_sample(session)
+            self.assertEqual(table["observation.state"].type, pa.list_(pa.float32(), 26))
+            state = table["observation.state"][0].as_py()
+            expected_pose = recording.ForwardKinematics().pose(np.zeros(6))
+            np.testing.assert_allclose(state[:12], expected_pose, atol=1e-6)
+            np.testing.assert_allclose(state[13:25], expected_pose, atol=1e-6)
+            self.assertEqual([state[12], state[25]], [0., 0.])
+            directory = self.root / "recordings" / name
+            self.assertEqual({p.name for p in directory.iterdir()}, {"frames.parquet", "top.mp4", "recording.json"})
+            self.assertEqual(json.loads((directory / "recording.json").read_text())["frames"], table.num_rows)
+        self.assertEqual({p.name for p in (self.root / "recordings").iterdir()}, {"first", "second"})
 
     def test_relayed_jpeg_frames_are_recorded_with_their_own_timestamps(self):
         import pyarrow.parquet as pq
@@ -317,9 +275,12 @@ class RecordingIntegrationTests(unittest.TestCase):
         session = recording.RecordingSession(options, self.references, relay=True)
         self.addCleanup(session.close)
 
-        def send(shade):
+        def send(index):
+            # Encode the source frame number in five black/white stripes.
+            stripes = [255 if index & (1 << bit) else 0 for bit in range(5)]
+            pixels = np.tile(np.repeat(stripes, 32), (120, 1)).astype(np.uint8)
             jpeg = io.BytesIO()
-            Image.fromarray(np.full((120, 160, 3), shade, np.uint8)).save(jpeg, format="JPEG")
+            Image.fromarray(pixels).convert("RGB").save(jpeg, format="JPEG")
             stamp = time.monotonic()
             payload = struct.pack("!d", stamp) + jpeg.getvalue()
             session.feeds["top"].sendall(struct.pack("!I", len(payload)) + payload)
@@ -335,19 +296,26 @@ class RecordingIntegrationTests(unittest.TestCase):
             session.start()
         time.sleep(.2)
         # No settling time after the last frame: frames in flight at stop must still be saved.
-        sent = [(send(shade * 10), time.sleep(.01))[0] for shade in range(20)]
-        states = [{"received_at_ns": sent[0], "position": .2}] * 7
-        for side in recording.SIDES:
-            session.publish(side, states)
+        sent = [(send(index), time.sleep(.01))[0] for index in range(20)]
+        for stamp in sent:
+            for side in recording.SIDES:
+                session.publish(side, [{"received_at_ns": stamp, "position": .2}] * 7)
         with redirect_stdout(io.StringIO()):
             session.finish(timeout=10)
         session.close()
-        episode = self.root / "episodes" / "relayed"
-        rgb = pq.read_table(episode / "rgb" / "top.parquet")
-        self.assertEqual(rgb["timestamp_ns"].to_pylist(), [stamp - sent[0] for stamp in sent])
-        self.assertEqual(rgb["frame_index"].to_pylist(), list(range(20)))
-        self.assertEqual(pq.read_table(episode / "state" / "left_eef.parquet").num_rows, 1)
-        self.assertEqual({p.name for p in (episode / "rgb").iterdir()}, {"top.mp4", "top.parquet"})
+        import av
+        from loom_data import sync
+        episode = self.root / "recordings" / "relayed"
+        grid = sync.frame_grid([sent])
+        count = pq.ParquetFile(episode / "frames.parquet").metadata.num_rows
+        self.assertEqual(count, len(grid))
+        with av.open(str(episode / "top.mp4")) as reader:
+            selected = []
+            for frame in reader.decode(video=0):
+                row = frame.to_ndarray(format="gray")[frame.height // 2]
+                bits = row[frame.width // 10::frame.width // 5] > 128
+                selected.append(sum(1 << bit for bit, on in enumerate(bits) if on))
+        np.testing.assert_array_equal(selected, sync.nearest(sent, grid))
 
     def test_debug_streams_are_saved_beside_the_contract_streams_on_the_same_time_origin(self):
         import pyarrow.parquet as pq
@@ -369,6 +337,10 @@ class RecordingIntegrationTests(unittest.TestCase):
         command = {"target": np.arange(7.) / 100, "torque": np.arange(7.) / 10}
         for side in recording.SIDES:
             session.publish(side, states, command)
+        for offset in range(1, 11):
+            for side in recording.SIDES:
+                session.samples.put((side, stamp + offset * 20_000_000, [.2] * 7, stamp + offset * 20_000_000))
+        time.sleep(.25)
         times = now + (np.arange(3) + 1) / 30
         pose = [.1, .2, .3, 1., 0., 0., 0., 1., 0., 0., 0., 1.]
         chunk = {name: (times, np.tile(pose, (3, 1)) if name.endswith("_eef") else np.array([.5, .4, .3]))
@@ -379,23 +351,22 @@ class RecordingIntegrationTests(unittest.TestCase):
         with redirect_stdout(io.StringIO()):
             session.finish(timeout=10)
         session.close()
-        episode = self.root / "episodes" / "debugged"
+        episode = self.root / "recordings" / "debugged"
         self.assertEqual({p.name for p in (episode / "debug").iterdir()},
                          {"left_joints.parquet", "right_joints.parquet", "targets.parquet", "chunks.parquet",
                           "run.json"})
         self.assertEqual(json.loads((episode / "debug" / "run.json").read_text())["arguments"]["replan_steps"], 16)
         # Every debug timestamp shares the origin of the contract streams.
-        eef = pq.read_table(episode / "state" / "left_eef.parquet").to_pylist()[0]
         joints = pq.read_table(episode / "debug" / "left_joints.parquet").to_pylist()
         self.assertEqual(len(joints), 1)
-        self.assertEqual(joints[0]["timestamp_ns"], eef["timestamp_ns"])
+        self.assertEqual(joints[0]["timestamp_ns"], 0)
         np.testing.assert_allclose(joints[0]["position"], np.arange(7) * .01, atol=1e-12)
         self.assertEqual(joints[0]["velocity"][3], .1 * 3)
         self.assertEqual(joints[0]["torque"], list(map(float, range(7))))
         np.testing.assert_allclose(joints[0]["target"], command["target"])
         np.testing.assert_allclose(joints[0]["feedforward"], command["torque"])
         row = pq.read_table(episode / "debug" / "chunks.parquet").to_pylist()[0]
-        origin = stamp - eef["timestamp_ns"]
+        origin = stamp
         self.assertEqual(row["observed_timestamp_ns"], stamp - origin)
         self.assertEqual(row["timestamp_ns"], round((now + .08) * 1e9) - origin)
         self.assertEqual((row["inference_ms"], row["first_row"]), (75., 2))
@@ -407,9 +378,7 @@ class RecordingIntegrationTests(unittest.TestCase):
         self.assertEqual((target["left_pose"], target["chunk"], target["row"], target["sent"]), (pose, 0, 2, False))
         self.assertAlmostEqual(target["right_openness"], .7, places=6)
         # The contract part of the episode is exactly what a recording without debug streams holds.
-        self.assertEqual({p.name for p in episode.iterdir()}, {"state", "rgb", "debug"})
-        self.assertEqual({p.name for p in (episode / "state").iterdir()},
-                         {f"{name}.parquet" for name in recording.STATE_NAMES})
+        self.assertEqual({p.name for p in episode.iterdir()}, {"frames.parquet", "top.mp4", "recording.json", "debug"})
 
     def test_invalid_feedback_and_recorder_death_never_publish_an_episode(self):
         session = self.open_session("invalid")
@@ -421,7 +390,7 @@ class RecordingIntegrationTests(unittest.TestCase):
                 session.check()
                 time.sleep(.01)
         session.close()
-        self.assertFalse((self.root / "episodes.jsonl").exists())
+        self.assertFalse((self.root / "recordings").exists())
         self.assertTrue((self.root / ".pending" / "invalid").exists())
         crashed = self.open_session("crashed")
         crashed.process.kill()
@@ -429,7 +398,7 @@ class RecordingIntegrationTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "unexpectedly"):
             crashed.check()
         crashed.close()
-        self.assertFalse((self.root / "episodes.jsonl").exists())
+        self.assertFalse((self.root / "recordings").exists())
 
     def test_dataset_lock_and_duplicate_ids_do_not_overwrite(self):
         session = self.open_session("reserved")

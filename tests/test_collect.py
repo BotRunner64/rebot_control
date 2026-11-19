@@ -126,12 +126,13 @@ class TeleopRecordingTests(unittest.TestCase):
         self.assertEqual(len(motors), 2)
         for motor in motors:
             side = "left" if motor["channel"] == "can0" else "right"
-            table = pq.read_table(self.root / "episodes" / "teleop" / "state" / f"{side}_eef.parquet")
+            table = pq.read_table(self.root / "recordings" / "teleop" / "frames.parquet")
             # Virtual feedback stays near the calibration pose while leader targets differ.
             bound = 4 * math.pi
             measured = int((.2 + bound) / (2 * bound) * 65535) / 65535 * 2 * bound - bound
             expected = recording.ForwardKinematics().pose(np.full(6, measured - .2))
-            np.testing.assert_allclose(table["pose"][0].as_py(), expected, atol=1e-12)
+            values = table["observation.state"][0].as_py()
+            np.testing.assert_allclose(values[:12] if side == "left" else values[13:25], expected, atol=1e-6)
             self.assertGreater(table.num_rows, 0)
             self.assertEqual(motor["position_queries"], 21)
             self.assertTrue(motor["closed"])
@@ -144,14 +145,14 @@ class TeleopRecordingTests(unittest.TestCase):
             self.assertTrue(motor["closed"])
             self.assertEqual(motor["enabled"], list(range(1, 8)))
             self.assertNotIn(4, motor["types"])
-        self.assertFalse((self.root / "episodes.jsonl").exists())
+        self.assertFalse((self.root / "recordings" / "teleop" / "frames.parquet").exists())
         self.assertTrue((self.root / ".pending" / "teleop").exists())
 
     def test_terminal_ctrl_c_drains_recorders_and_publishes_complete_episode(self):
         motors = self.run_virtual_teleop(terminal_interrupt=True)
         self.assertEqual(len(motors), 2)
-        self.assertTrue((self.root / "episodes.jsonl").exists())
-        self.assertTrue((self.root / "episodes" / "teleop" / "rgb" / "top.parquet").exists())
+        self.assertTrue((self.root / "recordings" / "teleop" / "frames.parquet").exists())
+        self.assertTrue((self.root / "recordings" / "teleop" / "top.mp4").exists())
 
 
 if __name__ == "__main__":

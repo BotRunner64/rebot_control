@@ -8,13 +8,13 @@ reBot Arm RS（B601-RS）双臂的控制、Star Arm 主手遥操作、数据采�
 
 ```bash
 conda create -n rebot_control python=3.11 && conda activate rebot_control
-pip install -e '.[ee,policy]'          # 在仓库根目录执行
+pip install -e '.[ee,policy,data]'          # 在仓库根目录执行
 ```
 
 - `ee`：末端位姿控制与策略控制所需的 IK 依赖（mink、quadprog）。
 - `policy`：远端策略通讯（msgpack）。同时安装协议包：`pip install -e ./policy_link`。
 - 相机采集使用系统自带的 `/usr/bin/python3` 和 GStreamer，需要的系统包见 [数据流程](docs/data.md#系统依赖)。
-- 导出 LeRobot 数据集的额外依赖见 [数据流程](docs/data.md#3-导出-lerobot-v3)。
+- `data` 安装采集和切分导出所用的 LOOM-data 契约实现。
 
 ## 第一次使用
 
@@ -51,8 +51,7 @@ rebot leader calibrate right
 | `rebot ee` | 末端位姿控制（默认仿真，`--hardware` 上实机） | 仅 `--hardware` |
 | `rebot policy` | 连接远端策略服务做双臂控制 | 是 |
 | `rebot identify` | 自动重力参数辨识 | 是 |
-| `rebot process` | 回放录制、切分 episode、标注 | 否 |
-| `rebot export` | 导出 LeRobot v3 数据集 | 否 |
+| `rebot process` | 回放、切分、标注并导出 LOOM LeRobot v3.0 数据集 | 否 |
 
 每个命令都支持 `--help`。
 
@@ -64,8 +63,7 @@ rebot teleop
 
 # 采集 → 切分标注 → 导出训练数据
 rebot collect --dataset datasets/cup --camera-viewer
-rebot process --dataset datasets/cup --output datasets/cup_processed
-rebot export  --dataset datasets/cup_processed --output datasets/cup_lerobot --repo-id local/cup
+rebot process --dataset datasets/cup --output datasets/cup_loom
 
 # 用完后归位并卸力
 rebot home

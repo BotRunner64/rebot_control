@@ -8,7 +8,7 @@ from pathlib import Path
 def main(argv=None, prog=None):
     parser = argparse.ArgumentParser(prog=prog, description=__doc__)
     parser.add_argument("--dataset", type=Path, required=True, help="Finalized continuous recordings")
-    parser.add_argument("--output", type=Path, required=True, help="New processed dataset directory")
+    parser.add_argument("--output", type=Path, required=True, help="New output directory for LOOM LeRobot v3.0 camera layouts")
     parser.add_argument("--plan", type=Path, help="Editable JSON plan outside raw dataset")
     parser.add_argument("--export", action="store_true", help="Export the saved plan without opening a server")
     parser.add_argument("--port", type=int, default=8090)

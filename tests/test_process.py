@@ -1,22 +1,22 @@
-"""Offline processing checks using real H.264 videos and asynchronous timestamps."""
+"""Offline processing checks using real H.264 videos and synchronized frame tables."""
 
 import copy
 import fcntl
 import hashlib
 import json
 from pathlib import Path
-import subprocess
+import shutil
 import tempfile
 import unittest
 from unittest.mock import patch
 
-import cv2
+import av
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 
 from rebot.data.process import Workspace, write_json
-from rebot.data.recording import schemas
+from loom_data import contract
 
 
 class ProcessingTests(unittest.TestCase):
@@ -25,32 +25,27 @@ class ProcessingTests(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
         self.raw = self.root / "raw"
-        directory = self.raw / "episodes" / "continuous"
-        (directory / "rgb").mkdir(parents=True)
-        (directory / "state").mkdir()
-        self.camera_times = np.array([20, 60, 130, 210, 300, 410, 530, 660, 800, 950, 1110, 1280], dtype=np.int64) * 1_000_000
-        schema = schemas()
-        for index, camera in enumerate(("camera_0", "camera_1")):
-            path = directory / "rgb" / (camera + ".mp4")
-            subprocess.run(["/usr/bin/python3", "-c", '''
-import sys, gi
-gi.require_version("Gst", "1.0")
-from gi.repository import Gst
-Gst.init(None)
-p = Gst.parse_launch("videotestsrc num-buffers=12 pattern=ball ! video/x-raw,width=160,height=120,framerate=10/1 ! x264enc tune=zerolatency bframes=0 ! video/x-h264,stream-format=avc,alignment=au ! mp4mux ! filesink name=output")
-p.get_by_name("output").set_property("location", sys.argv[1])
-p.set_state(Gst.State.PLAYING)
-m = p.get_bus().timed_pop_filtered(15 * Gst.SECOND, Gst.MessageType.EOS | Gst.MessageType.ERROR)
-p.set_state(Gst.State.NULL)
-assert m and m.type == Gst.MessageType.EOS
-''', str(path)], check=True, capture_output=True)
-            pq.write_table(pa.Table.from_arrays([pa.array(range(12)), pa.array(self.camera_times + index * 5_000_000)], schema=schema["rgb"]), path.with_suffix(".parquet"))
-        for side, offset in (("left", 0), ("right", 7_000_000)):
-            times = np.array([0, 100, 220, 330, 440, 550, 680, 810, 970, 1120, 1290], dtype=np.int64) * 1_000_000 + offset
-            for kind in ("eef", "gripper"):
-                values = [[float(index)] * 12 for index in range(len(times))] if kind == "eef" else np.linspace(0, 1, len(times))
-                pq.write_table(pa.Table.from_arrays([pa.array(times), pa.array(values, type=schema[kind][1].type)], schema=schema[kind]), directory / "state" / f"{side}_{kind}.parquet")
-        (self.raw / "episodes.jsonl").write_text(json.dumps({"episode_id": "continuous", "cameras": ["camera_0", "camera_1"], "instructions": [{"start_ns": 0, "end_ns": 1297000000, "text": "__pending__"}]}) + "\n")
+        directory = self.raw / "recordings" / "continuous"
+        directory.mkdir(parents=True)
+        count = 40
+        pose = np.tile([0., 0., 0., *np.eye(3).ravel(), .5], (count, 2))
+        pose[:, 0] = np.arange(count)
+        states = pa.array(pose.tolist(), type=contract.STATE)
+        pq.write_table(pa.Table.from_arrays([states, pa.array(["__pending__"] * count)], schema=contract.FRAME_SCHEMA),
+                       directory / "frames.parquet")
+        cameras = ["camera_0", "camera_1"]
+        (directory / "recording.json").write_text(json.dumps({"frames": count, "cameras": cameras,
+                                                              "instruction": "__pending__"}))
+        with av.open(str(directory / "camera_0.mp4"), "w") as writer:
+            stream = writer.add_stream("libx264", rate=30)
+            stream.width, stream.height, stream.pix_fmt = 640, 480, "yuv420p"
+            for k in range(count):
+                frame = av.VideoFrame.from_ndarray(np.full((480, 640, 3), k * 5, np.uint8), format="rgb24")
+                for packet in stream.encode(frame):
+                    writer.mux(packet)
+            for packet in stream.encode():
+                writer.mux(packet)
+        shutil.copyfile(directory / "camera_0.mp4", directory / "camera_1.mp4")
         self.workspace = Workspace(self.raw, self.root / "processed", self.root / "draft.json")
         self.addCleanup(self.workspace.previews.close)
         self.plan = self.workspace.empty_plan()
@@ -68,41 +63,23 @@ assert m and m.type == Gst.MessageType.EOS
         before = self.digest()
         result = self.workspace.export(self.plan)
         self.assertEqual(result["completed"], 2)
-        records = [json.loads(line) for line in (self.workspace.output / "episodes.jsonl").read_text().splitlines()]
-        self.assertEqual([r["episode_id"] for r in records], ["pick", "place"])
-        for item, record in zip(self.plan["episodes"], records):
-            destination = self.workspace.output / "episodes" / item["id"]
-            self.assertEqual(record["cameras"], ["top", "left_wrist"])
-            self.assertEqual(record["instructions"][0]["text"], item["instruction"])
-            latest = 0
-            for (session, group, name), times in self.workspace.streams.items():
-                keep = (times >= item["start_ns"]) & (times < item["end_ns"])
-                target = self.plan["camera_names"][name] if group == "rgb" else name
-                table = pq.read_table(destination / group / (target + ".parquet"))
-                original = pq.read_table(self.workspace.path(session, group, name + ".parquet"))
-                self.assertEqual(table.schema, original.schema)
-                np.testing.assert_array_equal(table["timestamp_ns"].to_numpy(), times[keep] - item["start_ns"])
-                latest = max(latest, int(times[keep][-1]) - item["start_ns"])
-                if group == "state":
-                    self.assertEqual(table.column(1).to_pylist(), original.filter(pa.array(keep)).column(1).to_pylist())
-                else:
-                    np.testing.assert_array_equal(table["frame_index"].to_numpy(), np.arange(keep.sum()))
-                    capture = cv2.VideoCapture(str(destination / group / (target + ".mp4")))
-                    original_capture = cv2.VideoCapture(str(self.workspace.path(session, group, name + ".mp4")))
-                    original_capture.set(cv2.CAP_PROP_POS_FRAMES, int(np.flatnonzero(keep)[0]))
-                    count = 0
-                    while True:
-                        ok, frame = capture.read()
-                        if not ok:
-                            break
-                        source_ok, source_frame = original_capture.read()
-                        self.assertTrue(source_ok)
-                        self.assertLess(np.mean(np.abs(frame.astype(float) - source_frame.astype(float))), 4)
-                        count += 1
-                    capture.release()
-                    original_capture.release()
-                    self.assertEqual(count, int(keep.sum()))
-            self.assertEqual(record["instructions"][0]["end_ns"], latest)
+        dataset = contract.Dataset(self.workspace.output / "top+left_wrist_640x480")
+        self.assertEqual([r["episode_id"] for r in dataset.episodes], ["pick", "place"])
+        self.assertNotIn("action", dataset.info["features"])
+        for item, record in zip(self.plan["episodes"], dataset.episodes):
+            times = self.workspace.times[item["session"]]
+            indices = np.flatnonzero((times >= item["start_ns"]) & (times < item["end_ns"]))
+            states, tasks = dataset.frames(record)
+            np.testing.assert_array_equal(states[:, 0], indices)
+            self.assertEqual(tasks, [item["instruction"]] * len(indices))
+            for camera in dataset.cameras:
+                path, offset = dataset.video(record, camera)
+                self.assertEqual(offset, 0)
+                with av.open(str(path)) as reader:
+                    frames = list(reader.decode(video=0))
+                    self.assertEqual(reader.streams.video[0].average_rate, 30)
+                np.testing.assert_allclose([f.time for f in frames], np.arange(len(indices)) / 30)
+                np.testing.assert_allclose([f.to_ndarray(format="rgb24").mean() for f in frames], indices * 5, atol=4)
         self.assertEqual(json.loads((self.workspace.output / "processing.json").read_text()), self.plan)
         self.assertEqual(before, self.digest())
 
@@ -118,8 +95,22 @@ assert m and m.type == Gst.MessageType.EOS
     def test_recording_instruction_applies_to_all_exported_episodes(self):
         self.plan["recording_instructions"] = {"continuous": "Repeat the same task"}
         self.workspace.export(self.plan)
-        records = [json.loads(line) for line in (self.workspace.output / "episodes.jsonl").read_text().splitlines()]
-        self.assertEqual([item["instructions"][0]["text"] for item in records], ["Repeat the same task"] * 2)
+        dataset = contract.Dataset(self.workspace.output / "top+left_wrist_640x480")
+        self.assertEqual(dataset.tasks, {0: "Repeat the same task"})
+
+    def test_different_camera_sets_publish_separate_layouts(self):
+        directory = self.raw / "recordings" / "second"
+        shutil.copytree(self.raw / "recordings" / "continuous", directory)
+        (directory / "recording.json").write_text(json.dumps({"frames": 40, "cameras": ["camera_0"],
+                                                              "instruction": "single view"}))
+        workspace = Workspace(self.raw, self.workspace.output, self.workspace.plan_path)
+        self.addCleanup(workspace.previews.close)
+        self.plan["episodes"][1]["session"] = "second"
+        workspace.export(self.plan)
+        for layout, episode_id in (("top_640x480", "place"), ("top+left_wrist_640x480", "pick")):
+            dataset = contract.Dataset(workspace.output / layout)
+            self.assertEqual([r["episode_id"] for r in dataset.episodes], [episode_id])
+            self.assertEqual(dataset.episodes[0]["episode_index"], 0)
 
     def test_invalid_plans_and_paths_are_rejected(self):
         for key, value in (("start_ns", -1), ("start_ns", 125000000.0), ("end_ns", 9_000_000_000),
@@ -154,7 +145,7 @@ assert m and m.type == Gst.MessageType.EOS
 
     def test_export_failure_never_publishes_partial_dataset(self):
         before = self.digest()
-        with patch("rebot.data.process.subprocess.run", return_value=subprocess.CompletedProcess([], 2, "", "Encoder failed")):
+        with patch("rebot.data.synchronous.video.extract_video_segment", side_effect=RuntimeError("Encoder failed")):
             with self.assertRaisesRegex(RuntimeError, "Encoder failed"):
                 self.workspace.export(self.plan)
         self.assertFalse(self.workspace.output.exists())
@@ -166,7 +157,7 @@ assert m and m.type == Gst.MessageType.EOS
         with self.assertRaisesRegex(ValueError, "already exists"):
             self.workspace.export(self.plan)
         self.plan["episodes"][0].update(start_ns=131_000_000, end_ns=132_000_000)
-        with self.assertRaisesRegex(ValueError, "no samples"):
+        with self.assertRaisesRegex(ValueError, "at least two"):
             self.workspace.validate(self.plan, exporting=True)
 
     def test_concurrent_export_to_same_destination_is_rejected(self):

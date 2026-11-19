@@ -75,7 +75,7 @@ class PreviewCache:
                     process = subprocess.Popen(command, env=env, stdin=subprocess.PIPE,
                                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
                     self.processes.add(process)
-                request = {"preview": True, "source": str(source), "output": temporary}
+                request = {"source": str(source), "output": temporary}
                 _, error = process.communicate(json.dumps(request), timeout=1810)
                 if process.returncode:
                     raise RuntimeError(error.strip() or "Preview conversion failed.")

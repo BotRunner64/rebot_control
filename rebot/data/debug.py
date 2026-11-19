@@ -1,7 +1,6 @@
 """Debug streams of a policy run, written under an episode's `debug/` directory.
 
-They sit next to the contract streams (`state/`, `rgb/`) but are not part of the dataset
-format: `rebot process` and `rebot export` never read them.
+These native-rate diagnostics share the synchronized frame clock.
 
     <side>_joints.parquet   every servo cycle: measured joints, joint target, commanded torque
     targets.parquet         every control period: the absolute EEF target handed to the robot

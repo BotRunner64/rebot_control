@@ -16,7 +16,6 @@ COMMANDS = {
     "ee": ("rebot.apps.ee", "End-effector pose control (simulation by default)"),
     "policy": ("rebot.apps.policy", "Dual-arm control from a remote policy server"),
     "process": ("rebot.apps.process", "Review recordings and export annotated episodes"),
-    "export": ("rebot.apps.export", "Export processed episodes as a LeRobot v3 dataset"),
     "cameras": ("rebot.apps.cameras", "Preview webcams in the browser"),
     "identify": ("rebot.apps.identify", "Gravity mass-scale calibration for one arm"),
 }

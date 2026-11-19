@@ -1,11 +1,10 @@
 # 数据流程
 
-三步，各自独立：
+采集后在浏览器里切分、标注并导出。
 
 ```text
-rebot collect   连续录制一整段遥操作        →  datasets/cup            （原始，只追加）
-rebot process   回放、切分 episode、写任务描述 →  datasets/cup_processed  （新目录）
-rebot export    30 FPS 对齐，转 LeRobot v3    →  datasets/cup_lerobot    （新目录）
+rebot collect   连续录制遥操作并同步到 30 fps   →  datasets/cup/recordings/
+rebot process   回放、切分并导出 LeRobot v3.0   →  datasets/cup_loom/<布局>/
 ```
 
 采集时不用管 episode 边界和任务描述，录完再标。本机的 `datasets/` 是指向数据盘 `/mnt/data/rebot_data` 的软链接。
@@ -14,7 +13,7 @@ rebot export    30 FPS 对齐，转 LeRobot v3    →  datasets/cup_lerobot    �
 
 ## 系统依赖
 
-相机采集和视频处理在系统 Python（`/usr/bin/python3`）下跑 GStreamer，Conda 环境里不需要装。Ubuntu：
+在 Python 3.11 或更高版本的 rebot_control 环境安装 `pip install -e '.[data]'`。相机采集和浏览器预览使用系统 Python 的 GStreamer。Ubuntu 系统包安装命令如下。
 
 ```bash
 sudo apt install python3-gi gir1.2-gstreamer-1.0 gstreamer1.0-plugins-base \
@@ -25,7 +24,7 @@ sudo apt install python3-gi gir1.2-gstreamer-1.0 gstreamer1.0-plugins-base \
 
 ## 1. 采集 `rebot collect`
 
-一条命令同时跑遥操作和录制。固定双臂 + 双夹爪，至少一路相机。
+一条命令同时跑遥操作和录制。固定双臂 + 双夹爪，一至三路相机。
 
 ```bash
 rebot collect --dataset datasets/cup                    # 自动发现相机，之后再标注
@@ -43,7 +42,7 @@ rebot collect --dataset datasets/cup \
 - `--record-gripper-open-deg`：夹爪物理全开对应的电机角度（默认 270），用于把记录的开合度归一化到 0–1。它和控制行程 `--gripper-open-deg` 是两回事。
 - 其余遥操作参数与 `rebot teleop` 相同。
 
-**录了什么**：从臂**实测**的末端位姿和夹爪开合度（不是主手角度，也不是控制目标），加每路相机的 H.264 视频和逐帧时间戳。视频等比例缩到最长边 960 px。
+**录制内容**为双臂实测末端位姿、夹爪开度和各路 RGB 视频。停止采集后，程序在所有流的共同时间段内生成 30 fps 同步帧。四路 state 和每路视频的第 k 帧对应同一时刻。
 
 **失败时**：相机出错、写盘出错、电机故障等都会让这次录制失败，数据留在 `<dataset>/.pending/` 供排查，不会混进正式数据。机械臂照常停止并保持。
 
@@ -52,12 +51,12 @@ rebot collect --dataset datasets/cup \
 本地网页，不连接机械臂和相机。原始数据只读。
 
 ```bash
-rebot process --dataset datasets/cup --output datasets/cup_processed
+rebot process --dataset datasets/cup --output datasets/cup_loom
 ```
 
 打开终端打印的 `http://127.0.0.1:8090`（`--port` 可改）：
 
-1. 顶部填 **Instruction**；需要时直接点画面角落改相机名。
+1. 顶部填 **Instruction**；点击画面角落，将相机名映射到实际视角 `top`、`left_wrist`、`right_wrist`。每段录制内同一视角只能出现一次。
 2. 回放检查时间轴。蓝色是保留的片段，阴影是排除的部分（回位、调整等）。
    - 选中一段，拖它的边缘只修剪这一段：往里拖，空出来的部分变成排除区；往外拖，到相邻片段为止。
    - 两段紧挨着时，按住 `Shift` 拖边缘是移动两段之间的切点（两段一起变）。
@@ -68,59 +67,32 @@ rebot process --dataset datasets/cup --output datasets/cup_processed
 
 **自动初切**：第一次打开时自动切一次。规则是找“双臂都回到起始姿态附近（10 cm、20° 以内）并静止 0.8 秒以上”的时刻，把它当作一次复位，复位之间的运动算一个 episode。这只是初稿——任务本身在起始位置附近停顿也会被误切——请对着视频确认。之后刷新不会重新自动切。
 
-**草稿**：保存在输出目录旁的 `cup_processed.plan.json`（`--plan` 可指定）。有草稿后可以不开网页直接导出：
+**草稿**：保存在输出目录旁的 `cup_loom.plan.json`（`--plan` 可指定）。有草稿后可以不开网页直接导出：
 
 ```bash
-rebot process --dataset datasets/cup --output datasets/cup_processed_v2 \
-  --plan datasets/cup_processed.plan.json --export
+rebot process --dataset datasets/cup --output datasets/cup_loom_v2 \
+  --plan datasets/cup_loom.plan.json --export
 ```
 
 规则：
 
 - 输出目录必须不存在。改了标注就换一个新的输出路径。
 - 导出前所有片段都要有非空、非 `__pending__` 的 instruction。
-- 片段是半开区间 `[start, end)`；各路数据按自己的时间戳筛选，不补帧、不插值。视频按帧精确裁切并重新编码。
+- 片段保留帧时刻落在 `[start, end)` 内的所有同步帧，至少两帧。新 episode 从第 0 帧开始计时。
 - 回放用的低分辨率预览缓存在草稿旁的 `.rebot-preview/`，可以随时删。
 
-## 3. 导出 LeRobot v3
+## 读取导出结果
 
-第一次使用先装转换依赖（只装数据集相关的部分）：
-
-```bash
-uv pip install --torch-backend cpu -e '.[lerobot]'
-uv pip install --no-deps lerobot==0.4.4
-```
-
-```bash
-rebot export --dataset datasets/cup_processed --output datasets/cup_lerobot --repo-id local/cup
-```
-
-- `--repo-id` 只是数据集名字，不会上传。输出目录必须不存在。
-- `--fps`（默认 30）；`--max-delta-ms`（默认 50）是对齐时允许的最大时间差，超过会报 `Synchronization gap` 并指出是哪路数据、哪个时刻——通常说明那路数据断采了。
-
-**对齐方式**：每个 episode 取所有数据流都有数据的时间段，按 30 Hz 建时间轴，每个时刻每路取**时间最近的样本**（不插值）。
-
-**state 和 action**（都是 26 维 float32）：
-
-```text
-[左臂 x y z, 左臂旋转矩阵按列展平 9 个, 左夹爪开合度,
- 右臂 x y z, 右臂旋转矩阵按列展平 9 个, 右夹爪开合度]
-```
-
-`observation.state[k]` 是第 k 个时刻的实测状态，`action[k]` 是**第 k+1 个时刻的实测状态**。也就是说 action 是“下一步实际到达的状态”，不是当时发给机械臂的指令（采集时没有记录指令）。
-
-读取示例：
+输出根目录下，每个相机布局对应一个完整的 LeRobot v3.0 数据集。例如，三路 4:3 相机的目录为 `datasets/cup_loom/top+left_wrist+right_wrist_640x480/`。稳定的 `episode_id` 对应草稿里的片段 ID。`processing.json` 在各布局的上一级，保存本次导出使用的标注。
 
 ```python
-from lerobot.datasets.lerobot_dataset import LeRobotDataset
+from pathlib import Path
+from loom_data.contract import Dataset
 
-dataset = LeRobotDataset(
-    repo_id="local/cup", root="/mnt/data/rebot_data/cup_lerobot", video_backend="pyav",
-    delta_timestamps={"action": [i / 30 for i in range(50)]},
-)
-sample = dataset[0]
-sample["observation.state"].shape   # (26,)
-sample["action"].shape              # (50, 26)
+dataset = Dataset(Path("datasets/cup_loom/top+left_wrist+right_wrist_640x480"))
+episode = dataset.episodes[0]
+state, instructions = dataset.frames(episode)
+video_path, first_frame = dataset.video(episode, "top")
 ```
 
-导出会用官方读取器重读校验、完整解码所有视频，通过后才发布；失败不留半成品。转换代码依赖 `lerobot==0.4.4` 的内部编码接口，升级 LeRobot 前先跑 `tests/test_lerobot.py`。
+每帧含 26 维 `observation.state` 和一条任务指令。训练时需要的动作由下游从同一 episode 的 state 构造。

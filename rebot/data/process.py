@@ -8,20 +8,20 @@ import os
 from pathlib import Path
 import re
 import shutil
-import subprocess
 import tempfile
 import threading
 from urllib.parse import parse_qs, urlencode, urlsplit
 
 import numpy as np
-import pyarrow as pa
-import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
+from loom_data import contract, sync
+
 from rebot.data.previews import PreviewCache
-from rebot.data.recording import CAMERA_ID, STATE_NAMES, identifier
-from rebot.data.reset_detection import DEFAULTS, MAX_AGE_NS, STEP_NS, suggest_ranges
-from rebot.paths import WEB, system_python
+from rebot.data.recording import CAMERA_ID, identifier
+from rebot.data.reset_detection import DEFAULTS, STEP_NS, suggest_ranges
+from rebot.data.synchronous import stage_clip
+from rebot.paths import WEB
 
 
 ASSETS = WEB / "process"
@@ -51,38 +51,28 @@ class Workspace:
             raise ValueError("Keep the processing plan outside the raw dataset.")
         if self.plan_path == self.output or self.output in self.plan_path.parents:
             raise ValueError("Keep the processing plan outside the output dataset.")
-        self.records = [json.loads(line) for line in (self.dataset / "episodes.jsonl").read_text().splitlines() if line.strip()]
-        self.sessions, self.streams = {}, {}
-        for record in self.records:
-            if not isinstance(record, dict) or not isinstance(record.get("cameras"), list):
-                raise ValueError("Malformed raw episodes.jsonl record.")
-            name = identifier(record.get("episode_id"), "episode ID")
-            if name in self.sessions:
-                raise ValueError("Duplicate raw session ID.")
-            cameras = record["cameras"]
-            if not cameras or len(set(cameras)) != len(cameras):
-                raise ValueError("Raw sessions require distinct cameras.")
-            ends, views = [], []
+        self.sessions, self.times, self.instructions = {}, {}, {}
+        for manifest in sorted((self.dataset / "recordings").glob("*/recording.json")):
+            name = identifier(manifest.parent.name, "recording ID")
+            record = json.loads(self.path(name, "recording.json").read_text(encoding="utf-8"))
+            cameras, count = record["cameras"], record["frames"]
+            if not isinstance(cameras, list) or not 1 <= len(cameras) <= 3 or len(set(cameras)) != len(cameras):
+                raise ValueError(f"{name}: expected one to three distinct cameras.")
+            frames = pq.ParquetFile(self.path(name, contract.FRAMES))
+            if (type(count) is not int or count < 2 or count != frames.metadata.num_rows
+                    or frames.schema_arrow != contract.FRAME_SCHEMA):
+                raise ValueError(f"{name}: invalid synchronized frame table.")
+            times = contract.frame_times(count)
+            views = []
             for camera in cameras:
                 identifier(camera, "camera name", CAMERA_ID)
-            for group, names in (("state", STATE_NAMES), ("rgb", cameras)):
-                for stream in names:
-                    path = self.path(name, group, stream + ".parquet")
-                    times = pq.read_table(path, columns=["timestamp_ns"])["timestamp_ns"].to_numpy()
-                    if not len(times) or np.any(times < 0) or np.any(times[1:] < times[:-1]):
-                        raise ValueError(f"Empty or unordered stream: {path}")
-                    if int(times[-1]) >= 2**53 - 1:
-                        raise ValueError("Recording is too long for exact browser nanosecond editing.")
-                    self.streams[name, group, stream] = times
-                    ends.append(int(times[-1]))
-                    if group == "rgb":
-                        frames = pq.read_table(path, columns=["frame_index"])["frame_index"].to_numpy()
-                        if not np.array_equal(frames, np.arange(len(times))):
-                            raise ValueError(f"Invalid source frame index: {path}")
-                        self.path(name, "rgb", stream + ".mp4")
-                        views.append({"id": stream, "frames": len(times),
-                                      "first_ns": int(times[0]), "last_ns": int(times[-1])})
-            self.sessions[name] = {"id": name, "duration_ns": max(ends) + 1, "cameras": views}
+                self.path(name, camera + ".mp4")
+                views.append({"id": camera, "frames": count, "first_ns": 0, "last_ns": int(times[-1])})
+            self.sessions[name] = {"id": name, "duration_ns": sync.frame_ns(count), "cameras": views}
+            self.times[name] = times
+            instruction = record["instruction"].strip()
+            if instruction and instruction != "__pending__":
+                self.instructions[name] = instruction
         if not self.sessions:
             raise ValueError("No finalized raw recordings found.")
         self.guard = threading.Lock()
@@ -94,7 +84,7 @@ class Workspace:
     def preview(self, session):
         if session not in self.sessions:
             raise ValueError("Unknown recording.")
-        sources = {camera["id"]: self.path(session, "rgb", camera["id"] + ".mp4")
+        sources = {camera["id"]: self.path(session, camera["id"] + ".mp4")
                    for camera in self.sessions[session]["cameras"]}
         result = self.previews.prepare(sources.values())
         if result["state"] == "ready":
@@ -103,25 +93,19 @@ class Workspace:
                                 for camera, source in sources.items()}
         return result
 
-    def path(self, session, group, filename):
-        path = (self.dataset / "episodes" / session / group / filename).resolve()
+    def path(self, session, filename):
+        path = (self.dataset / "recordings" / session / filename).resolve()
         if self.dataset not in path.parents or not path.is_file():
             raise ValueError("Missing source file or path outside raw dataset.")
         return path
 
     def empty_plan(self):
-        instructions = {}
-        for record in self.records:
-            texts = {item.get("text", "").strip() for item in record.get("instructions", [])}
-            texts.discard("")
-            texts.discard("__pending__")
-            if len(texts) == 1:
-                instructions[record["episode_id"]] = next(iter(texts))
-        return {"version": 1, "dataset": str(self.dataset), "recording_instructions": instructions, "camera_names": {
-            name: name for session in self.sessions.values() for name in [c["id"] for c in session["cameras"]]}, "episodes": []}
+        cameras = {c["id"]: c["id"] for session in self.sessions.values() for c in session["cameras"]}
+        return {"version": 2, "dataset": str(self.dataset), "recording_instructions": self.instructions.copy(),
+                "camera_names": cameras, "episodes": []}
 
     def validate(self, plan, *, exporting=False):
-        if not isinstance(plan, dict) or plan.get("version") != 1 or plan.get("dataset") != str(self.dataset):
+        if not isinstance(plan, dict) or plan.get("version") != 2 or plan.get("dataset") != str(self.dataset):
             raise ValueError("Plan version or raw dataset does not match this workspace.")
         for key in ("initialized_sessions", "auto_split_sessions"):
             initialized = plan.get(key, [])
@@ -143,8 +127,10 @@ class Workspace:
             raise ValueError("Name every source camera.")
         for value in mapping.values():
             identifier(value, "camera name", CAMERA_ID)
-        if len(set(mapping.values())) != len(mapping):
-            raise ValueError("Camera names must be unique.")
+        for session in self.sessions.values():
+            names = [mapping[c["id"]] for c in session["cameras"]]
+            if len(set(names)) != len(names):
+                raise ValueError("Camera names must be unique within each recording.")
         episodes, ids = plan.get("episodes"), set()
         if not isinstance(episodes, list) or exporting and not episodes:
             raise ValueError("Add at least one episode before exporting.")
@@ -165,9 +151,11 @@ class Workspace:
             if not isinstance(text, str) or exporting and (not text.strip() or text.strip() == "__pending__"):
                 raise ValueError("Set an instruction for every episode before exporting.")
             if exporting:
-                for (sid, group, stream), times in self.streams.items():
-                    if sid == session["id"] and not np.any((times >= start) & (times < end)):
-                        raise ValueError(f"{name}: range contains no samples in {stream}.")
+                first, stop = np.searchsorted(self.times[session["id"]], [start, end])
+                if stop - first < 2:
+                    raise ValueError(f"{name}: select at least two synchronized frames.")
+                if any(mapping[c["id"]] not in contract.CAMERA_IDS for c in session["cameras"]):
+                    raise ValueError("Name exported cameras top, left_wrist, or right_wrist.")
         return plan
 
     @staticmethod
@@ -180,52 +168,33 @@ class Workspace:
         if session not in self.analysis_cache:
             duration = self.sessions[session]["duration_ns"]
             grid = np.arange(0, duration, STEP_NS, dtype=np.int64)
-            poses, valid = {}, np.ones(len(grid), dtype=bool)
-            for side in ("left", "right"):
-                times = self.streams[session, "state", f"{side}_eef"]
-                indices = np.searchsorted(times, grid, side="right") - 1
-                safe = np.maximum(0, indices)
-                valid &= (indices >= 0) & (grid - times[safe] <= MAX_AGE_NS)
-                sampled, offset = np.empty((len(grid), 12)), 0
-                path = self.path(session, "state", f"{side}_eef.parquet")
-                for batch in pq.ParquetFile(path).iter_batches(batch_size=8192, columns=["pose"]):
-                    stop = offset + batch.num_rows
-                    a, b = np.searchsorted(safe, [offset, stop])
-                    if b > a:
-                        values = np.asarray(batch.column(0).to_pylist(), dtype=float)
-                        sampled[a:b] = values[safe[a:b] - offset]
-                    offset = stop
-                poses[side] = sampled
-            # Cache just the most recently analyzed recording.
-            self.analysis_cache = {session: (grid, poses, valid)}
-        grid, poses, valid = self.analysis_cache[session]
-        result = suggest_ranges(grid, poses, valid, self.sessions[session]["duration_ns"],
-                                reference_ns=reference_ns, **settings)
-        # Every proposed episode must be exportable across all native streams.
-        original_count = len(result["episodes"])
-        result["episodes"] = [item for item in result["episodes"] if all(
-            np.searchsorted(times, item["start_ns"], side="left") < np.searchsorted(times, item["end_ns"], side="left")
-            for (sid, _, _), times in self.streams.items() if sid == session)]
-        if original_count and not result["episodes"]:
-            result["usable"] = False
-            result["message"] = "Required streams do not overlap in the proposed episodes. Cut manually."
-        return result
+            indices = np.searchsorted(self.times[session], grid, side="right") - 1
+            table = pq.read_table(self.path(session, contract.FRAMES), columns=[contract.STATE_KEY])
+            states = table.column(0).combine_chunks().flatten().to_numpy().reshape(-1, contract.STATE_DIM)
+            poses = {side: states[indices, contract.STATE_SLICES[f"{side}_eef"]] for side in contract.SIDES}
+            self.analysis_cache = {session: (grid, poses)}
+        grid, poses = self.analysis_cache[session]
+        return suggest_ranges(grid, poses, np.ones(len(grid), dtype=bool), self.sessions[session]["duration_ns"],
+                              reference_ns=reference_ns, **settings)
+
+    def camera_path(self, session, camera):
+        if session not in self.sessions or camera not in [view["id"] for view in self.sessions[session]["cameras"]]:
+            raise ValueError("Unknown camera or session.")
+        return self.path(session, camera + ".mp4")
 
     def load_plan(self):
         return self.validate(json.loads(self.plan_path.read_text())) if self.plan_path.exists() else self.empty_plan()
 
     def frame(self, session, camera, timestamp):
         import cv2
-        times = self.streams.get((session, "rgb", camera))
-        if times is None:
-            raise ValueError("Unknown camera or session.")
-        index = bisect_right(times, timestamp) - 1
+        path = self.camera_path(session, camera)
+        index = bisect_right(self.times[session], timestamp) - 1
         if index < 0:
             raise ValueError("Camera has not started at this time.")
         with self.capture_lock:
             key = session, camera
             if key not in self.captures:
-                self.captures[key] = cv2.VideoCapture(str(self.path(session, "rgb", camera + ".mp4")))
+                self.captures[key] = cv2.VideoCapture(str(path))
             capture = self.captures[key]
             if int(capture.get(cv2.CAP_PROP_POS_FRAMES)) != index:
                 capture.set(cv2.CAP_PROP_POS_FRAMES, index)
@@ -255,48 +224,28 @@ class Workspace:
         self.output.parent.mkdir(parents=True, exist_ok=True)
         stage = Path(tempfile.mkdtemp(prefix=f".{self.output.name}-", dir=self.output.parent))
         try:
-            records = []
-            for number, item in enumerate(plan["episodes"]):
-                progress({"state": "running", "completed": number, "total": len(plan["episodes"]), "episode": item["id"]})
-                source, start, end = item["session"], item["start_ns"], item["end_ns"]
-                destination = stage / "episodes" / item["id"]
-                latest = 0
-                for group in ("state", "rgb"):
-                    (destination / group).mkdir(parents=True)
-                    names = STATE_NAMES if group == "state" else [c["id"] for c in self.sessions[source]["cameras"]]
-                    for name in names:
-                        times = self.streams[source, group, name]
-                        first, stop = np.searchsorted(times, [start, end], side="left")
-                        target = plan["camera_names"][name] if group == "rgb" else name
-                        # Read only overlapping row groups; keep memory bounded on long sessions.
-                        table = pq.read_table(self.path(source, group, name + ".parquet"),
-                                              filters=[("timestamp_ns", ">=", start), ("timestamp_ns", "<", end)])
-                        column = table.schema.get_field_index("timestamp_ns")
-                        table = table.set_column(column, table.schema.field(column), pc.subtract(table["timestamp_ns"], start))
-                        latest = max(latest, int(times[stop - 1]) - start)
-                        if group == "rgb":
-                            column = table.schema.get_field_index("frame_index")
-                            table = table.set_column(column, table.schema.field(column), pa.array(range(stop - first), type=pa.int64()))
-                            request = {"source": str(self.path(source, group, name + ".mp4")),
-                                       "output": str(destination / group / (target + ".mp4")),
-                                       "first_frame": int(first), "timestamps_ns": times[first:stop].tolist()}
-                            command, env = system_python("rebot.media.video_tools")
-                            result = subprocess.run(command, env=env, input=json.dumps(request),
-                                                    text=True, capture_output=True)
-                            if result.returncode:
-                                raise RuntimeError(f"Video export failed for {name}: {result.stderr[-2000:]}")
-                        pq.write_table(table, destination / group / (target + ".parquet"), compression="zstd")
-                if latest <= 0:
-                    raise ValueError("Selected episode must have a positive sampled duration.")
-                records.append({"episode_id": item["id"], "cameras": [plan["camera_names"][c["id"]] for c in self.sessions[source]["cameras"]],
-                                "instructions": [{"start_ns": 0, "end_ns": latest, "text": self.instruction(plan, item).strip()}]})
-            (stage / "episodes.jsonl").write_text("".join(json.dumps(record, ensure_ascii=False) + "\n" for record in records))
+            layouts = {}
+            episodes = plan["episodes"]
+            with tempfile.TemporaryDirectory(dir=stage) as clips:
+                for number, item in enumerate(episodes):
+                    progress({"state": "running", "completed": number, "total": len(episodes), "episode": item["id"]})
+                    source = item["session"]
+                    first, stop = np.searchsorted(self.times[source], [item["start_ns"], item["end_ns"]])
+                    cameras = {plan["camera_names"][c["id"]]: self.camera_path(source, c["id"])
+                               for c in self.sessions[source]["cameras"]}
+                    directory = Path(clips) / item["id"]
+                    record = stage_clip(directory, self.path(source, contract.FRAMES), cameras,
+                                        int(first), int(stop), self.instruction(plan, item).strip())
+                    layout = contract.layout_name(record["cameras"], record["sizes"])
+                    layouts.setdefault(layout, []).append((record, directory))
+                for layout, members in layouts.items():
+                    contract.build_dataset(stage / layout, "rebot", members)
             write_json(stage / "processing.json", plan)
             # Never publish over an existing destination, including one created during export.
             if self.output.exists():
                 raise ValueError("Output appeared during export; refusing to replace it.")
             stage.rename(self.output)
-            return {"state": "done", "completed": len(records), "total": len(records), "output": str(self.output)}
+            return {"state": "done", "completed": len(episodes), "total": len(episodes), "output": str(self.output)}
         finally:
             if stage.exists():
                 shutil.rmtree(stage)
@@ -334,9 +283,7 @@ class Handler(BaseHTTPRequestHandler):
     def video(self, query, *, head=False):
         workspace = self.server.workspace
         session, camera = query["session"][0], query["camera"][0]
-        if (session, "rgb", camera) not in workspace.streams:
-            raise ValueError("Unknown camera or session.")
-        path = workspace.path(session, "rgb", camera + ".mp4")
+        path = workspace.camera_path(session, camera)
         if query.get("preview") == ["1"]:
             path = workspace.previews.path(path)
             if not path.is_file():
@@ -415,7 +362,8 @@ class Handler(BaseHTTPRequestHandler):
                 if url.path == "/api/frame":
                     self.respond(200, workspace.frame(session, camera, int(query["t"][0])), "image/jpeg")
                 else:
-                    self.respond(200, workspace.streams[session, "rgb", camera].tolist())
+                    workspace.camera_path(session, camera)
+                    self.respond(200, workspace.times[session].tolist())
             elif url.path in ("/", "/app.js", "/playback.js", "/style.css"):
                 filename, mime = {"/": ("index.html", "text/html; charset=utf-8"),
                                   "/app.js": ("app.js", "text/javascript; charset=utf-8"),
