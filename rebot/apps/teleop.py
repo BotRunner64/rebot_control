@@ -24,6 +24,7 @@ import numpy as np
 from rebot.bindings import select_arms, select_leaders
 from rebot.devices.robstride import MotorBus
 from rebot.devices.stararm import AngleFeedbackError, open_leader, read_angles, release_torque
+from rebot.model.gravity import GravityModel
 from rebot.model.gripper import load_gripper_settings
 from rebot.model.leader_map import leader_angles, map_target
 from rebot.model.limits import GRIPPER_OPEN_DEG
@@ -32,7 +33,7 @@ from rebot.runtime.arm import Arm, FeedbackPolicy, follower_range
 from rebot.runtime.console import StopKey, StopSignal, handle_signals, stop_signals
 from rebot.runtime.ipc import SharedFrame, latest, stop_on_error, supervisor_alive, wait_phase
 from rebot.runtime.timing import LoopTiming
-from rebot.settings import load_settings
+from rebot.settings import ControlSettings, load_settings
 
 MOTOR_HZ = 200
 TARGET_HZ = 500
@@ -44,7 +45,7 @@ class Plan:
     """Everything the workers need to know; pickled into each spawned process."""
     arms: dict                           # side -> ArmBinding
     leaders: dict                        # side -> LeaderBinding
-    settings: object                     # ControlSettings
+    gravity: dict[str, tuple[np.ndarray, ControlSettings]]  # mass scales and settings per arm
     gripper: object                      # GripperSettings, or None to leave motor 7 alone
     gripper_open_deg: float
 
@@ -57,8 +58,10 @@ class Plan:
         return 6 if self.gripper is None else 7
 
     def arm(self, side, stop, bus_factory):
-        # Gravity compensation is off: native position gains hold the arm.
-        return Arm(self.arms[side], self.settings, gripper=self.gripper,
+        scales, settings = self.gravity[side]
+        model = GravityModel()
+        model.apply_scales(scales)
+        return Arm(self.arms[side], settings, gravity=model, gripper=self.gripper,
                    gripper_open_deg=self.gripper_open_deg, feedback=FeedbackPolicy.tolerant(),
                    stop=stop, bus_factory=bus_factory)
 
@@ -378,8 +381,14 @@ def make_plan(config=ARM_BINDINGS, leader_config=LEADER_BINDINGS, settings_path=
               side="both", gripper=True, gripper_open_deg=GRIPPER_OPEN_DEG,
               gripper_settings_path=GRIPPER_SETTINGS, gripper_torque_nm=None):
     """Load and cross-check every binding and setting before any process starts."""
-    plan = Plan(select_arms(config, side), select_leaders(leader_config, side),
-                load_settings(settings_path),
+    arms = select_arms(config, side)
+    settings = load_settings(settings_path)
+    # Send validated parameters to workers; each motor process owns its Pinocchio model.
+    gravity = {}
+    for name, binding in arms.items():
+        model, arm_settings = GravityModel.for_arm(binding, settings)
+        gravity[name] = model.scales, arm_settings
+    plan = Plan(arms, select_leaders(leader_config, side), gravity,
                 load_gripper_settings(gripper_settings_path, gripper_torque_nm) if gripper else None,
                 gripper_open_deg)
     for name in plan.sides:
@@ -415,7 +424,7 @@ def teleop(plan, *, recording=None, source_factory=StarArmSource, bus_factory=Mo
         try:
             with stop_signals(supervisor.stop), StopKey() as keys:
                 print(f"PHYSICAL TELEOP: motor {MOTOR_HZ} Hz per arm; target {TARGET_HZ} Hz; "
-                      "gravity compensation off, MIT target velocity zero. Support the Star Arm leaders. "
+                      "measured-pose gravity feedforward on, MIT target velocity zero. Support the Star Arm leaders. "
                       "Space/Esc/Q/Ctrl-C stops and holds.", flush=True)
                 if plan.gripper is not None:
                     print(f"Gripper: leader closing tolerance {plan.gripper.leader_close_tolerance_deg:g} deg; "

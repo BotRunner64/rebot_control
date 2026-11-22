@@ -124,8 +124,6 @@ class RecordingBus(mit.MotorBus):
                 'modes': self.bus.modes, 'closed': self.bus.closed,
                 'enabled': sorted(self.enabled), 'position_queries': len(queries),
                 'types': sorted({(m.arbitration_id >> 24) & 31 for m in self.bus.sent}),
-                'arm_tau_zero': all((m.arbitration_id >> 8) & 65535 == 32767
-                                    for m in frames if m.arbitration_id & 255 != 7),
                 'velocity_zero': all(struct.unpack('>HHHH', m.data)[1] == 32767 for m in frames),
                 'hold': [mit.decode_mit(m, self.models[(m.arbitration_id & 255)-1])
                          for m in frames[-len(self.motor_ids):]],

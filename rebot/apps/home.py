@@ -5,7 +5,6 @@ This is the only command that disables motors.
 
 import argparse
 from contextlib import ExitStack
-from dataclasses import replace
 import math
 from pathlib import Path
 import sys
@@ -63,17 +62,15 @@ def home(config=ARM_BINDINGS, settings_path=CONTROL_SETTINGS, side="both", speed
     if not math.isfinite(speed) or speed <= 0:
         raise ValueError("Home speed must be finite and positive.")
     cfg = load_settings(settings_path)
-    if calibration is not None:
-        cfg = replace(cfg, gravity_scale=np.ones(6))
     bindings = select_arms(config, side)
     sides = tuple(bindings)
     stop = StopSignal() if stop is None else stop
     arms, trackers, stats = {}, {}, {}
     for name, binding in bindings.items():
-        model = GravityModel(calibration=calibration, binding=binding)
+        model, arm_cfg = GravityModel.for_arm(binding, cfg, calibration)
         model.validate(np.zeros(6))
-        arms[name] = Arm(binding, cfg, gravity=model, joint_limits=False, bus_factory=bus_factory)
-        trackers[name] = TrajectoryTracker(model, cfg)
+        arms[name] = Arm(binding, arm_cfg, gravity=model, joint_limits=False, bus_factory=bus_factory)
+        trackers[name] = TrajectoryTracker(model, arm_cfg)
         stats[name] = MotionStats()
     completed = False
     with stop_signals(stop), ExitStack() as stack:

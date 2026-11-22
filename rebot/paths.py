@@ -18,6 +18,10 @@ GRIPPER_SETTINGS = CONFIG / "gripper.yaml"
 SYSTEM_PYTHON = "/usr/bin/python3"
 
 
+def gravity_calibration(side):
+    return CONFIG / f"gravity.{side}.local.yaml"
+
+
 def system_python(module, *args, flags=("-B",)):
     """Return (command, env) that runs a `rebot.media` module under the system interpreter."""
     path = os.pathsep.join(filter(None, (str(ROOT), os.environ.get("PYTHONPATH"))))

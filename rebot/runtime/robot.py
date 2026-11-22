@@ -64,9 +64,13 @@ class Robot:
         try:
             bindings = select_arms(self.config, "both")
             gripper = load_gripper_settings(self.gripper_settings)
-            arms = {side: Arm(bindings[side], self.cfg, gravity=GravityModel(), gripper=gripper,
-                              gripper_open_deg=self.gripper_open_deg, stop=self.stop,
-                              bus_factory=self.bus_factory) for side in SIDES}
+            arms = {}
+            for side in SIDES:
+                binding = bindings[side]
+                model, cfg = GravityModel.for_arm(binding, self.cfg)
+                arms[side] = Arm(binding, cfg, gravity=model, gripper=gripper,
+                                 gripper_open_deg=self.gripper_open_deg, stop=self.stop,
+                                 bus_factory=self.bus_factory)
             self.stack.enter_context(open_arms(arms))
             # Verify both arms and warm both IK solvers before enabling either arm.
             for side, arm in arms.items():

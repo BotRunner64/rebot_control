@@ -13,7 +13,7 @@ from unittest.mock import patch
 import numpy as np
 from scipy.spatial.transform import Rotation
 
-from fakes import VirtualMotors, reply
+from fakes import VirtualMotors, isolate_config, reply
 from rebot import bindings
 from rebot.apps import ee
 from rebot.bindings import ArmBinding
@@ -162,6 +162,7 @@ class TrackingMotors(VirtualMotors):
 @unittest.skipUnless(EE_AVAILABLE, "Install the ee dependency extra to test Mink control")
 class HardwareTests(unittest.TestCase):
     def setUp(self):
+        isolate_config(self)
         self.reference = np.array([.1, .2, -.3, .4, -.5, .6])
         self.virtual = TrackingMotors(self.reference + TEST_START)
         self.binding = ArmBinding("right", "virtual-can", robstride.MODELS, dict(self.virtual.uids),

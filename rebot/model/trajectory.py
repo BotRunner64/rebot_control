@@ -16,7 +16,7 @@ from rebot.paths import RUNS
 MOTION_KP = np.array([50., 150., 150., 50., 50., 50.])
 MOTION_KD = np.array([3., 10., 10., 5., 4., 4.])
 HOME_SPEED = .3
-SAMPLING_SPEED = .2
+SAMPLING_SPEED = .8
 
 
 def minimum_jerk(start, goal, elapsed, duration):

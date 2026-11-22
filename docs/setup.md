@@ -60,6 +60,7 @@ rebot mirror
 | `config/arm.local.yaml` | 从臂绑定与 `reference_rad` | `rebot arm` |
 | `config/leader.local.yaml` | 主手绑定与 `reference_deg` | `rebot leader` |
 | `config/control.yaml` | 控制参数与安全阈值 | 手工编辑 |
+| `config/gravity.left.local.yaml`、`config/gravity.right.local.yaml` | 对应臂的重力补偿标定 | 从 `rebot identify` 的结果目录复制 `calibration.yaml` |
 | `config/gripper.yaml` | 夹爪增益、力矩上限、闭合预压 | 手工编辑 |
 
 `*.local.yaml` 不进 Git。所有命令都可用 `--config` 指定其他绑定文件。

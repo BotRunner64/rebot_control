@@ -1,5 +1,6 @@
 """Gravity models and robot-bound static mass calibration profiles."""
 
+from dataclasses import replace
 import hashlib
 import math
 from pathlib import Path
@@ -11,7 +12,7 @@ import yaml
 
 from rebot.model.arrays import vector6
 from rebot.model.limits import JOINT_LIMITS_DEG, STATE_LIMIT_TOLERANCE_RAD
-from rebot.paths import MODELS
+from rebot.paths import MODELS, gravity_calibration
 
 MODEL_PATH = MODELS / "rebot_rs_dynamics.urdf"
 ARM_JOINTS = [f"joint{i}" for i in range(1, 7)]
@@ -41,6 +42,22 @@ def check_binding(profile, binding):
 
 class GravityModel:
     """Six-joint rigid-body gravity torques, optionally with calibrated mass scales."""
+
+    @classmethod
+    def for_arm(cls, binding, settings, calibration=None):
+        """Load the operating model and its matching feedforward settings for one arm."""
+        if calibration is None:
+            calibration = gravity_calibration(binding.side)
+            try:
+                calibration.lstat()
+            except FileNotFoundError:
+                return cls(), settings
+        try:
+            model = cls(calibration=calibration, binding=binding)
+        except (KeyError, TypeError, ValueError, AttributeError, yaml.YAMLError) as exc:
+            raise ValueError(f"Invalid {binding.side} gravity calibration {calibration}: {exc}") from exc
+        print(f"{binding.side}: loaded gravity calibration {calibration}", flush=True)
+        return model, replace(settings, gravity_scale=np.ones(6))
 
     def __init__(self, path=MODEL_PATH, calibration=None, binding=None):
         self.path = Path(path)

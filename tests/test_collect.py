@@ -18,8 +18,11 @@ from unittest.mock import MagicMock, patch
 
 import numpy as np
 
+from fakes import isolate_config
 from rebot.apps import teleop
 from rebot.data import recording
+from rebot.model.gravity import GravityModel
+from rebot.settings import load_settings
 from teleop_fakes import BusFactory, SourceFactory, virtual_bindings
 
 
@@ -38,6 +41,7 @@ def gst_available():
 
 class CollectUnitTests(unittest.TestCase):
     def test_recording_rejects_missing_sides_before_connecting_hardware(self):
+        isolate_config(self)
         for side, gripper in (("left", True), ("both", False)):
             arms, leaders = virtual_bindings(side)
             with patch.object(teleop, "select_arms", return_value=arms), \
@@ -56,6 +60,7 @@ class CollectUnitTests(unittest.TestCase):
 @unittest.skipUnless(gst_available(), "System GStreamer H.264 plugins are required")
 class TeleopRecordingTests(unittest.TestCase):
     def setUp(self):
+        isolate_config(self)
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
@@ -124,7 +129,9 @@ class TeleopRecordingTests(unittest.TestCase):
 
         motors = self.run_virtual_teleop()
         self.assertEqual(len(motors), 2)
+        gravity = GravityModel().gravity(np.zeros(6)) * load_settings().gravity_scale
         for motor in motors:
+            np.testing.assert_allclose([p["gravity"] for p in motor["parameters"][:6]], gravity, atol=.004)
             side = "left" if motor["channel"] == "can0" else "right"
             table = pq.read_table(self.root / "recordings" / "teleop" / "frames.parquet")
             # Virtual feedback stays near the calibration pose while leader targets differ.

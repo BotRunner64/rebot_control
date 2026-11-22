@@ -14,6 +14,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 import numpy as np
+import yaml
 
 import rebot
 from rebot.apps import guide as guide_app
@@ -23,7 +24,7 @@ from rebot.model import trajectory
 from rebot.model.gravity import GravityModel
 from rebot.model.guiding import HandGuidingController
 from rebot.settings import load_settings
-from fakes import VirtualMotors, arm_bindings, patch_hardware
+from fakes import VirtualMotors, arm_bindings, isolate_config, patch_hardware
 
 
 def kind_of(msg):
@@ -32,6 +33,7 @@ def kind_of(msg):
 
 class LifecycleTests(unittest.TestCase):
     def setup_run(self, fail_right=False):
+        self.config_dir = isolate_config(self)
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         # MotionLog() writes below RUNS/motion; keep it out of the repository.
@@ -43,6 +45,38 @@ class LifecycleTests(unittest.TestCase):
         item = patch.object(trajectory, "RUNS", Path(directory.name))
         item.start()
         self.addCleanup(item.stop)
+
+    def test_dual_guide_loads_only_the_installed_side_and_explicit_path_wins(self):
+        self.setup_run()
+        nominal = GravityModel()
+        binding = self.arms["right"]
+        profile = dict(version=2, kind="static_mass_scale", method="paired_static",
+                       accepted=True, side="right", model_sha256=nominal.sha256,
+                       motor_uids=binding.motor_uids, reference_rad=binding.reference[:6].tolist(),
+                       mass_scales=[1., 1.1, 1.3, 1.2, 1., 1.25])
+        installed = self.config_dir / "gravity.right.local.yaml"
+        installed.write_text(yaml.safe_dump(profile))
+        with redirect_stdout(io.StringIO()):
+            guide_app.guide(side="both", duration=.025)
+        q = np.full(6, .2)
+        expected = {"can0": nominal.gravity(q) * load_settings().gravity_scale,
+                    "can1": nominal.basis(q) @ profile["mass_scales"]}
+        for channel, bus in self.virtual.items():
+            frames = [msg for msg in bus.sent if kind_of(msg) == 1]
+            self.assertTrue(frames)
+            for msg in frames:
+                i = (msg.arbitration_id & 255) - 1
+                bound = robstride.LIMITS[binding.models[i]].torque
+                torque = ((msg.arbitration_id >> 8) & 65535) / 65535 * 2 * bound - bound
+                self.assertAlmostEqual(torque, expected[channel][i], delta=.003)
+
+        override = self.config_dir / "trial.yaml"
+        installed.rename(override)
+        installed.write_text(yaml.safe_dump(dict(profile, side="left")))
+        with self.assertRaisesRegex(ValueError, "gravity.right.local.yaml"):
+            guide_app.guide(side="right", duration=.025)
+        with redirect_stdout(io.StringIO()):
+            guide_app.guide(side="right", duration=.025, calibration=override)
 
     def test_partial_dual_enable_failure_keeps_enabled_motors_held(self):
         self.setup_run(fail_right=True)

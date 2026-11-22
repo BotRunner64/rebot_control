@@ -1,12 +1,9 @@
 """Hand guiding: gravity compensation, damping, and position hold when the arm is still."""
 
 import argparse
-from dataclasses import replace
 import math
 from pathlib import Path
 import time
-
-import numpy as np
 
 from rebot.bindings import select_arms
 from rebot.devices.robstride import MotorBus
@@ -26,18 +23,15 @@ def guide(config=ARM_BINDINGS, settings_path=CONTROL_SETTINGS, side="right",
     if not math.isfinite(gravity_scale) or not 0 < gravity_scale <= 1:
         raise ValueError("Gravity scale must be greater than 0 and at most 1.")
     cfg = load_settings(settings_path)
-    if calibration is not None:
-        # A calibrated model already carries the measured masses.
-        cfg = replace(cfg, gravity_scale=np.ones(6))
     bindings = select_arms(config, side)
     stop = StopSignal() if stop is None else stop
     arms, controllers = {}, {}
     for name, binding in bindings.items():
-        model = GravityModel(calibration=calibration, binding=binding)
-        arms[name] = Arm(binding, cfg, gravity=model, gravity_scale=gravity_scale,
+        model, arm_cfg = GravityModel.for_arm(binding, cfg, calibration)
+        arms[name] = Arm(binding, arm_cfg, gravity=model, gravity_scale=gravity_scale,
                          kp=cfg.hold_kp, kd=cfg.damping, joint_limits=False,
                          bus_factory=bus_factory)
-        controllers[name] = HandGuidingController(model, cfg, gravity_scale)
+        controllers[name] = HandGuidingController(model, arm_cfg, gravity_scale)
     with stop_signals(stop), StopKey() as keys, open_arms(arms):
         for name, arm in arms.items():
             print(f"{name}: verified {arm.binding.channel}; predicted gravity (N*m): "

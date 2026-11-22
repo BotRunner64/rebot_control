@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 import numpy as np
 
-from fakes import arm_bindings
+from fakes import arm_bindings, isolate_config
 from rebot.bindings import SIDES, select_sides
 from rebot.devices import robstride
 from rebot.runtime import robot as control
@@ -50,6 +50,7 @@ class RobotTests(unittest.TestCase):
     OPEN_START = (0., .5, 1., 0., .1, 0., .1)
 
     def hardware(self, start=START):
+        isolate_config(self)
         virtual = {side: MeasuredMotors(index * 100) for index, side in enumerate(SIDES)}
         start = np.array(start)
         selected = arm_bindings({side: (side, motor) for side, motor in virtual.items()},

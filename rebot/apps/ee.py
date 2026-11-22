@@ -120,8 +120,9 @@ def control(*, hardware=False, side="right", config=ARM_BINDINGS, settings_path=
     lower = upper = None
     start = SIM_START.copy() if start_joints is None else np.radians(vector6(start_joints, "Start joints"))
     if hardware:
-        arm = Arm(select_arms(config, side)[side], load_settings(settings_path),
-                  gravity=GravityModel(), stop=stop, bus_factory=bus_factory)
+        binding = select_arms(config, side)[side]
+        model, cfg = GravityModel.for_arm(binding, load_settings(settings_path))
+        arm = Arm(binding, cfg, gravity=model, stop=stop, bus_factory=bus_factory)
         lower, upper = arm.range.lower, arm.range.upper
         start = np.clip(start, lower, upper)
     ik = CartesianIK(start, lower, upper, tcp_offset=tcp_offset)

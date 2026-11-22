@@ -18,18 +18,20 @@ import numpy as np
 
 import yaml
 
-from fakes import reply
+from fakes import isolate_config, reply
 from rebot.apps import home as rebot_home
 from rebot.apps import teleop
 from rebot.bindings import ArmBinding
 from rebot.devices import robstride as mit
 from rebot.devices import socketcan
 from rebot.devices.robstride import MODELS
+from rebot.model.gravity import GravityModel
 from rebot.model.leader_map import map_target
 from rebot.runtime.arm import follower_range
 from rebot.runtime.console import StopSignal
 from rebot.runtime.ipc import SharedFrame, fresh, latest
 from rebot.runtime.timing import LoopTiming
+from rebot.settings import load_settings
 from teleop_fakes import (BusFactory, SourceFactory, MeasuredMotors, virtual_bindings,
                           signal_while_stop_lock_is_held, wait_for_signal)
 
@@ -197,6 +199,7 @@ class SharedFrameTests(unittest.TestCase):
 
 class ProcessLifecycleTests(unittest.TestCase):
     def setUp(self):
+        self.config = isolate_config(self)
         self.context = mp.get_context("spawn")
         self.counts = self.context.Array("i", 2)
         self.hardware_reports = self.context.Queue()
@@ -247,7 +250,7 @@ class ProcessLifecycleTests(unittest.TestCase):
             self.assertEqual(record["enabled"], list(range(1, count + 1)))
             self.assertTrue(all(record["modes"][i] == 2 for i in range(1, count + 1)))
             self.assertNotIn(4, record["types"])
-            self.assertTrue(record["arm_tau_zero"])
+            self.assertGreater(max(abs(p["gravity"]) for p in record["hold"][:6]), .05)
             self.assertTrue(record["velocity_zero"])
             for hold in record["hold"]:
                 self.assertGreater(hold["kp"], 0)
@@ -256,12 +259,23 @@ class ProcessLifecycleTests(unittest.TestCase):
         return motors
 
     def test_real_spawn_runs_independent_hardware_with_existing_mit_parameters(self):
+        nominal = GravityModel()
+        right = virtual_bindings()[0]["right"]
+        scales = [1., 1.1, 1.3, 1.2, 1., 1.25]
+        profile = dict(version=2, kind="static_mass_scale", method="paired_static", accepted=True,
+                       side="right", motor_uids=right.motor_uids, model_sha256=nominal.sha256,
+                       reference_rad=right.reference[:6].tolist(), mass_scales=scales)
+        (self.config / "gravity.right.local.yaml").write_text(yaml.safe_dump(profile))
         messages = self.run_teleop()
         motors = self.assert_holding()
         pids = [r["pid"] for r in self.snapshots]
         self.assertEqual(len(set(pids)), 4)
         self.assertNotIn(os.getpid(), pids)
-        for record in motors.values():
+        expected = {"can0": nominal.gravity(np.zeros(6)) * load_settings().gravity_scale,
+                    "can1": nominal.basis(np.zeros(6)) @ scales}
+        for channel, record in motors.items():
+            for commands in (record["parameters"], record["hold"]):
+                np.testing.assert_allclose([p["gravity"] for p in commands[:6]], expected[channel], atol=.004)
             self.assertGreater(record["calls"], 0)
             self.assertEqual(record["position_queries"], 21)
             np.testing.assert_allclose(record["first"], [.2] * 7)
@@ -385,6 +399,9 @@ class ProcessLifecycleTests(unittest.TestCase):
 
 
 class BindingAndDisableTests(unittest.TestCase):
+    def setUp(self):
+        isolate_config(self)
+
     def test_invalid_gripper_torque_and_travel_are_rejected_before_spawning_workers(self):
         arms, leaders = virtual_bindings("right")
         with patch.object(teleop, "select_arms", return_value=arms), \

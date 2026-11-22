@@ -78,7 +78,7 @@ with Arm(binding, settings, gravity=model, ...) as arm:   # 打开 CAN、核验 
 | home / identify | 有 | — | — | — |
 | ee | 有 | — | `strict`：缺一次回复就停 | `ArmWorker` 线程，250 Hz |
 | policy | 有 | 有 | `strict` | `ArmWorker` 线程，250 Hz（经 `Robot`） |
-| teleop / collect | 无 | 有 | `tolerant`：每轴重试 15 次 | 每臂一个进程，200 Hz |
+| teleop / collect | 有 | 可选，collect 需要夹爪 | `tolerant`：每轴重试 15 次 | 每臂一个进程，200 Hz |
 
 `servo()` 一个周期：检查目标与上次反馈的误差 → 算重力前馈和夹爪力矩 → 发一批 MIT 指令并收齐回复 → 校验姿态、更新退出保持 → 再检查一次误差。
 

@@ -50,7 +50,7 @@ def open_arm(model, cfg, raw, reference=.5):
 
 
 def dataset(path, scales, independent=False, corrupt_validation=False, friction=0.,
-            experiment="identification", candidate=None, payload=None, side="right"):
+            experiment="identification", candidate=None, payload=None, side="right", speed=.2):
     model = gravity.GravityModel()
     cfg = load_settings()
     plan = gravity_fit.make_plan([0, .7, 1.1, 0, 0, 0], cfg, independent=independent)
@@ -59,7 +59,7 @@ def dataset(path, scales, independent=False, corrupt_validation=False, friction=
                 "reference_rad": [0.] * 6,
                 "model_sha256": model.sha256, "plan": plan, "settings": cfg.plain(), "sample_s": .5}
     applied = np.ones(6) if candidate is None else np.array(candidate["mass_scales"])
-    metadata.update(experiment=experiment, applied_mass_scales=applied.tolist(), payload=payload, speed=.2)
+    metadata.update(experiment=experiment, applied_mass_scales=applied.tolist(), payload=payload, speed=speed)
     if candidate is not None:
         metadata["settings"]["gravity_scale"] = [1.] * 6
     loaded_model = gravity.GravityModel()
@@ -462,7 +462,8 @@ class WorkflowTests(unittest.TestCase):
     def fake_collect(self, plan, output, **options):
         dataset(Path(output), [1, 1.1, 1.35, 1.2, 1.15, 1.25],
                 independent=Path(plan).name == "validation_plan.yaml",
-                experiment=options.get("experiment", "identification"), candidate=options.get("candidate"))
+                experiment=options.get("experiment", "identification"), candidate=options.get("candidate"),
+                speed=options["speed"])
         return "completed"
 
     def test_default_run_samples_once_and_saves_profile(self):
@@ -472,6 +473,7 @@ class WorkflowTests(unittest.TestCase):
             result = identify.run_calibration(root, start=self.start)
             self.assertTrue(result["accepted"])
             collect.assert_called_once()
+            self.assertEqual(collect.call_args.kwargs["speed"], .8)
             self.assertTrue((root / "calibrated.urdf").exists())
             profile = yaml.safe_load((root / "calibration.yaml").read_text())
             self.assertFalse(profile["verified"])
@@ -540,7 +542,7 @@ class WorkflowTests(unittest.TestCase):
             planned = yaml.safe_load(Path(plan).read_text())
             self.assertEqual(len([p for p in planned["poses"] if p["stage"] == "sample"]), 24)
             dataset(Path(output), np.ones(6), independent=True, side=options["side"],
-                    experiment=options["experiment"], payload=options["payload"])
+                    experiment=options["experiment"], payload=options["payload"], speed=options["speed"])
             return "completed"
 
         with tempfile.TemporaryDirectory() as directory, redirect_stdout(io.StringIO()), \
@@ -777,7 +779,8 @@ class CollectTests(unittest.TestCase):
             plan = {"version": 2, "method": "paired_static", "units": "rad",
                     "model_sha256": gravity.GravityModel().sha256, "start": gravity_fit.clearance_pose(0).tolist(), "poses": poses}
             gravity_fit.write_yaml(root / "plan.yaml", plan)
-            identify.collect(root / "plan.yaml", root / "data.jsonl", settle_s=.5, sample_s=.5)
+            # At 0.2 rad/s and 50 Hz, a continuous command advances at most 0.004 rad per tick.
+            identify.collect(root / "plan.yaml", root / "data.jsonl", speed=.2, settle_s=.5, sample_s=.5)
             rows = [json.loads(line) for line in (root / "data.jsonl").read_text().splitlines()]
             samples = [row for row in rows if row["type"] == "sample"]
             first_next = next(row for row in samples if row["pose_id"] == 4)

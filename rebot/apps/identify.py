@@ -381,7 +381,7 @@ def payload_session(output, source=None, mass=None, com=None, *, side="right", c
 def main(argv=None, prog=None):
     common = argparse.ArgumentParser(add_help=False, argument_default=argparse.SUPPRESS)
     common.add_argument("--side", choices=SIDES)
-    common.add_argument("--speed", type=float, help="Peak joint speed in rad/s")
+    common.add_argument("--speed", type=float, help=f"Peak joint speed in rad/s (default: {SAMPLING_SPEED:g})")
     common.add_argument("--config", type=Path)
     common.add_argument("--settings", type=Path)
     parser = argparse.ArgumentParser(prog=prog, description=__doc__, parents=[common])

@@ -1,17 +1,30 @@
 """Shared test doubles: an in-process RobStride firmware model and binding helpers."""
 
 from contextlib import ExitStack
+from pathlib import Path
 import struct
+import tempfile
 import time
 from unittest.mock import patch
 
 import can
 import numpy as np
 
-from rebot import bindings
+from rebot import bindings, paths
 from rebot.bindings import ArmBinding
 from rebot.devices import robstride
 from rebot.devices.robstride import MODELS
+
+
+def isolate_config(test):
+    """Give virtual arms their own directory for machine-local gravity profiles."""
+    directory = tempfile.TemporaryDirectory()
+    test.addCleanup(directory.cleanup)
+    root = Path(directory.name)
+    config = patch.object(paths, "CONFIG", root)
+    config.start()
+    test.addCleanup(config.stop)
+    return root
 
 
 def reply(kind, motor, data=bytes(8), mode=0):
