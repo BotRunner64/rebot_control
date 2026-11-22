@@ -1,0 +1,13 @@
+<!-- Dual-arm mounting frame: origin on the tabletop, halfway between the bases. -->
+<body name="workstation" pos="0.2525 0 0.75">
+  <body name="camera_stand" pos="-0.04 0 0">
+    <geom name="mast_foot" type="box" pos="0 0 0.0035" size="0.030 0.035 0.0035" rgba=".30 .32 .32 1" contype="0" conaffinity="0"/>
+    <geom name="mast" type="box" pos="0 0 0.3495" size="0.015 0.015 0.3425" rgba=".62 .65 .64 1" contype="0" conaffinity="0"/>
+    <geom name="camera_bracket" type="box" pos=".012 0 .666" size=".0125 .0135 .004" rgba=".22 .24 .24 1" contype="0" conaffinity="0"/>
+    <geom name="scene_camera_housing" type="box" pos=".020 0 .650" size=".0125 .0285 .016" rgba=".13 .16 .16 1" contype="0" conaffinity="0"/>
+    <geom name="scene_lens_barrel" type="cylinder" pos=".036 0 .650" size=".009 .0035" zaxis="1 0 0" rgba=".11 .15 .15 1" contype="0" conaffinity="0"/>
+    <geom name="scene_lens_glass" type="cylinder" pos=".040 0 .650" size=".005 .0007" zaxis="1 0 0" rgba=".16 .35 .38 1" contype="0" conaffinity="0"/>
+    <!-- Reference drawing shows a level lens facing the work area (+X). -->
+    <camera name="scene_rgb" pos=".040 0 .650" xyaxes="0 -1 0  0 0 1"/>
+  </body>
+</body>

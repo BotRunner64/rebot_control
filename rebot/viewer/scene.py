@@ -17,8 +17,8 @@ def model_meshes(model, *, include_boxes=True):
     meshes = []
     for index in range(model.ngeom):
         kind = model.geom_type[index]
-        if kind != mujoco.mjtGeom.mjGEOM_MESH and not (
-                include_boxes and kind == mujoco.mjtGeom.mjGEOM_BOX):
+        primitive = kind == mujoco.mjtGeom.mjGEOM_BOX or kind == mujoco.mjtGeom.mjGEOM_CYLINDER
+        if kind != mujoco.mjtGeom.mjGEOM_MESH and not (include_boxes and primitive):
             continue
         material = model.geom_matid[index]
         rgba = model.mat_rgba[material] if material >= 0 else model.geom_rgba[index]
@@ -29,6 +29,9 @@ def model_meshes(model, *, include_boxes=True):
             face_start, face_count = model.mesh_faceadr[mesh], model.mesh_facenum[mesh]
             packet.update(vertices=model.mesh_vert[start:start + count].ravel().tolist(),
                           faces=model.mesh_face[face_start:face_start + face_count].ravel().tolist())
+        elif kind == mujoco.mjtGeom.mjGEOM_CYLINDER:
+            radius, half_length = model.geom_size[index, :2]
+            packet["cylinder"] = [float(radius), float(2 * half_length)]
         else:
             packet["size"] = (model.geom_size[index] * 2).tolist()
         meshes.append(packet)
@@ -58,7 +61,7 @@ class SceneViewer:
                                      "title": self.title}, allow_nan=False).encode()
         center = np.array([.4, 0., 1.]) if target == "rebot" else np.array([0., 0., .15])
         distance = 1.7 if target == "rebot" else 1.2
-        direction = np.array([-1., -.25, .5])
+        direction = np.array([1., -.9, .53]) if target == "rebot" else np.array([-1., -.25, .5])
         self.camera = {"position": (center + direction / np.linalg.norm(direction) * distance).tolist(),
                        "target": center.tolist()}
         self.sync()

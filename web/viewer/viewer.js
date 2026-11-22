@@ -291,8 +291,15 @@ try {
   document.body.classList.toggle('hardware', hardware);
   $('environment').textContent = readOnly ? 'Preview' : hardware ? 'Hardware' : 'Simulation';
   model.meshes.forEach((data) => {
-    const geometry = data.size ? new THREE.BoxGeometry(...data.size) : new THREE.BufferGeometry();
-    if (!data.size) {
+    let geometry;
+    if (data.size) {
+      geometry = new THREE.BoxGeometry(...data.size);
+    } else if (data.cylinder) {
+      const [radius, length] = data.cylinder;
+      geometry = new THREE.CylinderGeometry(radius, radius, length, 32);
+      geometry.rotateX(Math.PI / 2); // MuJoCo cylinders use local Z.
+    } else {
+      geometry = new THREE.BufferGeometry();
       geometry.setAttribute('position', new THREE.Float32BufferAttribute(data.vertices, 3));
       geometry.setIndex(data.faces); geometry.computeVertexNormals();
     }

@@ -5,7 +5,9 @@ import math
 
 import numpy as np
 
-# Official Seeed LeRobot RS follower limits, ordered J1-J6 and gripper.
+# Software travel limits in motor coordinates relative to the reference, ordered J1-J6
+# and gripper. J1-J5 match LeRobot's RS profile (motor_family.py); J6 +/-130 deg follows
+# Seeed's current integration (LeRobot uses +/-90). The URDF limits are not used.
 JOINT_LIMITS_DEG = ((-145., 145.), (0., 170.), (0., 200.), (-80., 90.),
                     (-90., 90.), (-130., 130.), (0., 270.))
 GRIPPER_OPEN_DEG = 270.

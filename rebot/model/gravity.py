@@ -1,6 +1,7 @@
 """Gravity models and robot-bound static mass calibration profiles."""
 
 import hashlib
+import math
 from pathlib import Path
 import xml.etree.ElementTree as ET
 
@@ -9,6 +10,7 @@ import pinocchio as pin
 import yaml
 
 from rebot.model.arrays import vector6
+from rebot.model.limits import JOINT_LIMITS_DEG, STATE_LIMIT_TOLERANCE_RAD
 from rebot.paths import MODELS
 
 MODEL_PATH = MODELS / "rebot_rs_dynamics.urdf"
@@ -65,14 +67,33 @@ class GravityModel:
             check_binding(profile, binding)
             self.apply_scales(profile["mass_scales"])
         self.data = self.model.createData()
-        self.lower = self.model.lowerPositionLimit.copy()
-        self.upper = self.model.upperPositionLimit.copy()
+        # The URDF limits (copied from Seeed's description, used for its sim) are not
+        # the arm's travel: J1 +/-160 deg even exceeds the mechanical +/-150 deg. Use the
+        # same software limits as every other controller; the URDF file, and its hash
+        # bound into plans and calibration profiles, stays unchanged.
+        limits = np.radians(JOINT_LIMITS_DEG[:6])
+        self.lower, self.upper = limits[:, 0].copy(), limits[:, 1].copy()
 
     def apply_scales(self, scales):
         self.scales = validate_scales(scales)
         for index, scale in enumerate(self.scales, 1):
             self.model.inertias[index] = pin.Inertia.FromDynamicParameters(
                 self.parameters[10 * (index - 1):10 * index] * scale)
+
+    def add_point_payload(self, mass, com):
+        """Add a point mass specified in the URDF link6 frame (gravity only)."""
+        com = np.asarray(com, dtype=float)
+        if not np.isfinite(mass) or mass <= 0 or com.shape != (3,) or not np.all(np.isfinite(com)):
+            raise ValueError("Expected a positive payload mass and three finite link6 COM coordinates.")
+        frame = self.model.frames[self.model.getFrameId("link6")]
+        inertia = pin.Inertia(mass, com, np.zeros((3, 3)))
+        joint = frame.parentJoint
+        self.model.inertias[joint] = self.model.inertias[joint] + frame.placement.act(inertia)
+
+    def tool_height(self, q):
+        """World height of the gripper_end frame, in metres."""
+        pin.framesForwardKinematics(self.model, self.data, q)
+        return self.data.oMf[self.model.getFrameId("gripper_end")].translation[2]
 
     def basis(self, q):
         zero = np.zeros(6)
@@ -85,9 +106,27 @@ class GravityModel:
         return pin.computeGeneralizedGravity(self.model, self.data, vector6(q, "q")).copy()
 
     def validate(self, q):
+        """Accept poses within the shared state tolerance of the model limits.
+
+        J2/J3 rest on hard stops at their zero limits, so measured rest poses can sit
+        slightly below zero; the same tolerance as `JointRange.validate` applies.
+        """
         q = vector6(q, "q")
-        if np.any(q < self.lower - .03) or np.any(q > self.upper + .03):
-            raise ValueError("Joint pose is outside model limits; check software zero and physical pose.")
+        tolerance = STATE_LIMIT_TOLERANCE_RAD
+        invalid = np.flatnonzero((q < self.lower - tolerance) | (q > self.upper + tolerance))
+        if len(invalid):
+            details = "; ".join(
+                f"J{i + 1}: {math.degrees(q[i]):.2f} deg, limits=[{math.degrees(self.lower[i]):.2f}, "
+                f"{math.degrees(self.upper[i]):.2f}] deg" for i in invalid)
+            raise ValueError(f"Joint pose is outside model limits: {details}; "
+                             f"tolerance={math.degrees(tolerance):.2f} deg. "
+                             "Check software zero and physical pose.")
+        return q
+
+    def limit_excess(self, q):
+        """Per-joint distance outside the model limits (zero inside)."""
+        q = vector6(q, "q")
+        return np.maximum(0., np.maximum(self.lower - q, q - self.upper))
 
     def export_urdf(self, scales, output):
         """Scale each reduced body's constituent links, retaining CAD centers of mass."""
