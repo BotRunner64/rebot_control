@@ -1,4 +1,4 @@
-"""Align native device samples and stage annotated clips using the LOOM-data contract."""
+"""Align native device samples and stage annotated clips in the export contract format."""
 
 import json
 
@@ -6,7 +6,8 @@ import av
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
-from loom_data import contract, sync, video
+
+from rebot.data import contract
 
 
 def synchronize(native, destination, cameras, instruction):
@@ -27,14 +28,14 @@ def synchronize(native, destination, cameras, instruction):
         if path.stat().st_size % 8:
             raise ValueError(f"Incomplete camera timestamp in {path}")
         times[camera] = np.fromfile(path, dtype="<i8")
-    grid = sync.frame_grid([*(t for t, _ in streams.values()), *times.values()])
+    grid = contract.frame_grid([*(t for t, _ in streams.values()), *times.values()])
     origin = int(grid[0])
     tasks = [{"start_ns": 0, "end_ns": int(grid[-1]) - origin, "text": instruction}]
     count = contract.write_frames(destination, streams, tasks, origin, grid)
     for camera in cameras:
         source = native / "rgb" / f"{camera}.mp4"
         path = destination / f"{camera}.mp4"
-        video.transcode_video(source, path, times[camera], grid)
+        contract.transcode_video(source, path, times[camera], grid)
         with av.open(str(path)) as reader:
             if reader.streams.video[0].frames != count:
                 raise ValueError(f"{camera}: encoded video length differs from the frame table.")
@@ -54,8 +55,8 @@ def stage_clip(directory, source_frames, cameras, first, stop, instruction):
     pq.write_table(table, directory / contract.FRAMES)
     videos = {}
     for camera, path in cameras.items():
-        segment = {"path": str(path), "from_timestamp": first / sync.FPS, "to_timestamp": stop / sync.FPS}
-        videos[camera] = video.extract_video_segment(segment, directory / f"{camera}.mp4", range(count), sync.FPS)
+        segment = {"path": str(path), "from_timestamp": first / contract.FPS, "to_timestamp": stop / contract.FPS}
+        videos[camera] = contract.extract_video_segment(segment, directory / f"{camera}.mp4", range(count), contract.FPS)
     record = contract.episode_record(directory.name, count, videos)
     contract.validate_episode(directory, record)
     return record

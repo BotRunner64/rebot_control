@@ -1,6 +1,6 @@
 # 数据格式
 
-`rebot collect` 和 `rebot policy --record` 保存可回放的连续录制。`rebot process` 把选中的片段写成 LOOM-data 的标准 LeRobot v3.0 数据集。操作步骤见[数据流程](data.md)，完整字段定义见 [LOOM-data 导出契约](https://github.com/BotRunner64/LOOM-data/blob/feba93d4df58c3fbbd2ba51a55617c3459c07ade/docs/contract/export-contract.md)。
+`rebot collect` 和 `rebot policy --record` 保存可回放的连续录制。`rebot process` 把选中的片段写成 LOOM-data 的标准 LeRobot v3.0 数据集。操作步骤见[数据流程](data.md)，完整字段定义见 [LOOM-data 导出契约](https://github.com/BotRunner64/LOOM-data/blob/feba93d4df58c3fbbd2ba51a55617c3459c07ade/docs/contract/export-contract.md)。本仓库不依赖 loom-data 包：`rebot/data/contract.py` 按该契约（commit `feba93d`）自行实现同步、编码和数据集组装，输出文件与 loom-data 逐字节一致；契约更新时需要手动同步这个文件。
 
 ## 连续录制
 

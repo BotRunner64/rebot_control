@@ -16,7 +16,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from rebot.data.process import Workspace, write_json
-from loom_data import contract
+from rebot.data import contract
 
 
 class ProcessingTests(unittest.TestCase):
@@ -145,7 +145,7 @@ class ProcessingTests(unittest.TestCase):
 
     def test_export_failure_never_publishes_partial_dataset(self):
         before = self.digest()
-        with patch("rebot.data.synchronous.video.extract_video_segment", side_effect=RuntimeError("Encoder failed")):
+        with patch("rebot.data.synchronous.contract.extract_video_segment", side_effect=RuntimeError("Encoder failed")):
             with self.assertRaisesRegex(RuntimeError, "Encoder failed"):
                 self.workspace.export(self.plan)
         self.assertFalse(self.workspace.output.exists())

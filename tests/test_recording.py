@@ -304,9 +304,9 @@ class RecordingIntegrationTests(unittest.TestCase):
             session.finish(timeout=10)
         session.close()
         import av
-        from loom_data import sync
+        from rebot.data import contract
         episode = self.root / "recordings" / "relayed"
-        grid = sync.frame_grid([sent])
+        grid = contract.frame_grid([sent])
         count = pq.ParquetFile(episode / "frames.parquet").metadata.num_rows
         self.assertEqual(count, len(grid))
         with av.open(str(episode / "top.mp4")) as reader:
@@ -315,7 +315,7 @@ class RecordingIntegrationTests(unittest.TestCase):
                 row = frame.to_ndarray(format="gray")[frame.height // 2]
                 bits = row[frame.width // 10::frame.width // 5] > 128
                 selected.append(sum(1 << bit for bit, on in enumerate(bits) if on))
-        np.testing.assert_array_equal(selected, sync.nearest(sent, grid))
+        np.testing.assert_array_equal(selected, contract.nearest(sent, grid))
 
     def test_debug_streams_are_saved_beside_the_contract_streams_on_the_same_time_origin(self):
         import pyarrow.parquet as pq

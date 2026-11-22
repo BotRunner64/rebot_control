@@ -15,8 +15,7 @@ from urllib.parse import parse_qs, urlencode, urlsplit
 import numpy as np
 import pyarrow.parquet as pq
 
-from loom_data import contract, sync
-
+from rebot.data import contract
 from rebot.data.previews import PreviewCache
 from rebot.data.recording import CAMERA_ID, identifier
 from rebot.data.reset_detection import DEFAULTS, STEP_NS, suggest_ranges
@@ -68,7 +67,7 @@ class Workspace:
                 identifier(camera, "camera name", CAMERA_ID)
                 self.path(name, camera + ".mp4")
                 views.append({"id": camera, "frames": count, "first_ns": 0, "last_ns": int(times[-1])})
-            self.sessions[name] = {"id": name, "duration_ns": sync.frame_ns(count), "cameras": views}
+            self.sessions[name] = {"id": name, "duration_ns": contract.frame_ns(count), "cameras": views}
             self.times[name] = times
             instruction = record["instruction"].strip()
             if instruction and instruction != "__pending__":

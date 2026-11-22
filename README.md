@@ -14,7 +14,7 @@ pip install -e '.[ee,policy,data]'          # 在仓库根目录执行
 - `ee`：末端位姿控制与策略控制所需的 IK 依赖（mink、quadprog）。
 - `policy`：远端策略通讯（msgpack）。同时安装协议包：`pip install -e ./policy_link`。
 - 相机采集使用系统自带的 `/usr/bin/python3` 和 GStreamer，需要的系统包见 [数据流程](docs/data.md#系统依赖)。
-- `data` 安装采集和切分导出所用的 LOOM-data 契约实现。
+- `data`：采集同步和切分导出所需的视频编解码（PyAV）。导出格式遵循 LOOM-data 契约，由 `rebot/data/contract.py` 实现，不需要安装 loom-data。
 
 ## 第一次使用
 

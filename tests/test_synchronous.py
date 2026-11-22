@@ -1,4 +1,4 @@
-"""Exercise native device timing against the pinned LOOM-data export contract."""
+"""Exercise native device timing against the LOOM-data export contract."""
 
 import tempfile
 import unittest
@@ -8,7 +8,7 @@ import av
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
-from loom_data import contract
+from rebot.data import contract
 from scipy.spatial.transform import Rotation
 
 from rebot.data.recording import schemas

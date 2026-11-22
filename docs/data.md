@@ -87,7 +87,7 @@ rebot process --dataset datasets/cup --output datasets/cup_loom_v2 \
 
 ```python
 from pathlib import Path
-from loom_data.contract import Dataset
+from rebot.data.contract import Dataset
 
 dataset = Dataset(Path("datasets/cup_loom/top+left_wrist+right_wrist_640x480"))
 episode = dataset.episodes[0]
