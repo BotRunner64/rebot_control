@@ -10,7 +10,7 @@ venv/
 .mypy_cache/
 .coverage
 
-# Local machine configuration (USB paths, motor UIDs)
+# Machine-local configuration includes hardware bindings and per-arm gravity calibrations.
 *.local.yaml
 
 # Run artifacts
